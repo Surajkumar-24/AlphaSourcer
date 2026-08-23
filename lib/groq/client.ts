@@ -1,4 +1,4 @@
-import { AI_MODELS, GROQ_CONFIG } from '@/config/models';
+import { GROQ_CONFIG, getModelChain, ModelSpec } from '@/config/models';
 
 /** Per-search token accounting, so quota use is measurable rather than guessed. */
 export const tokenLedger = {
@@ -11,142 +11,179 @@ export const tokenLedger = {
   },
 };
 
-const MAX_ATTEMPTS = 4;
-// A per-minute limit clears in seconds. A daily-quota 429 can report a
-// Retry-After of many minutes — never block a search on that; fail fast so the
-// caller can fall back to deterministic ranking.
+const MAX_ATTEMPTS_PER_MODEL = 3;
+// A per-minute limit clears in seconds. A daily-quota 429 reports a Retry-After
+// of many minutes — switch models instead of blocking the search on it.
 const MAX_RETRY_WAIT_MS = 20000;
+
+type GroqError = Error & { status?: number; retryAfterMs?: number };
+
+/**
+ * Models proven unusable this process (decommissioned, no access). Remembered
+ * so a dead model is probed once rather than on every call.
+ */
+const unusableModels = new Set<string>();
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** True when the model itself is the problem, so retrying it is pointless. */
+function isModelUnusable(error: GroqError): boolean {
+  if (error.status === 404) return true;
+  const message = error.message.toLowerCase();
+  return (
+    message.includes('decommission') ||
+    message.includes('does not exist') ||
+    message.includes('do not have access') ||
+    message.includes('model_not_found')
+  );
+}
+
+export interface GroqOptions {
+  temperature?: number;
+  maxTokens?: number;
+  jsonMode?: boolean;
+}
+
 /**
- * Groq's free tier enforces a tokens-per-minute ceiling. A 429 means "come back
- * shortly", not "this candidate is unusable", so honour Retry-After and retry
- * rather than dropping work on the floor.
+ * Sends a request through the model chain. A model is abandoned when it is
+ * decommissioned, out of daily quota, or repeatedly failing, and the next one
+ * is tried. Groq meters limits per model, so this also buys extra capacity.
  */
 export async function groqRequest<T = any>(
   messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>,
-  options?: {
-    temperature?: number;
-    maxTokens?: number;
-    jsonMode?: boolean;
-  }
-): Promise<T> {
-  let lastError: unknown = null;
-
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    try {
-      return await groqRequestOnce<T>(messages, options);
-    } catch (error) {
-      lastError = error;
-      const info = error as { status?: number; retryAfterMs?: number };
-      if (info.status !== 429 || attempt === MAX_ATTEMPTS) throw error;
-
-      if (info.retryAfterMs && info.retryAfterMs > MAX_RETRY_WAIT_MS) {
-        console.warn(
-          `Groq quota exhausted (retry in ${Math.round(info.retryAfterMs / 1000)}s); not waiting.`
-        );
-        throw error;
-      }
-
-      const waitMs = info.retryAfterMs ?? Math.min(2000 * 2 ** (attempt - 1), 15000);
-      console.warn(`Groq rate limited; retrying in ${waitMs}ms (attempt ${attempt}/${MAX_ATTEMPTS})`);
-      await sleep(waitMs);
-    }
-  }
-
-  throw lastError;
-}
-
-async function groqRequestOnce<T = any>(
-  messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>,
-  options?: {
-    temperature?: number;
-    maxTokens?: number;
-    jsonMode?: boolean;
-  }
+  options?: GroqOptions
 ): Promise<T> {
   if (!GROQ_CONFIG.apiKey) {
     throw new Error('GROQ_API_KEY not configured');
   }
 
-  const model = AI_MODELS.primary;
-  const temperature = options?.temperature ?? 0.7;
-  const maxTokens = options?.maxTokens ?? 2000;
+  const chain = getModelChain();
+  let lastError: unknown = null;
 
-  try {
-    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${GROQ_CONFIG.apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages,
-        temperature,
-        max_tokens: maxTokens,
-        response_format: options?.jsonMode ? { type: 'json_object' } : undefined,
-      }),
-    });
+  const usable = chain.filter((m) => !unusableModels.has(m.id));
+  const candidates = usable.length > 0 ? usable : chain; // all dead: re-probe
 
-    if (!response.ok) {
-      let errorMessage = 'Unknown error';
+  for (const model of candidates) {
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_MODEL; attempt++) {
       try {
-        const error = await response.json();
-        errorMessage = error.error?.message || JSON.stringify(error);
-      } catch {
-        errorMessage = await response.text();
+        const result = await groqRequestOnce<T>(model, messages, options);
+        if (model.id !== chain[0].id) {
+          console.warn(`[groq] served by fallback model ${model.id}`);
+        }
+        return result;
+      } catch (error) {
+        lastError = error;
+        const info = error as GroqError;
+
+        if (isModelUnusable(info)) {
+          unusableModels.add(model.id);
+          console.warn(`[groq] ${model.id} unusable (${info.message.slice(0, 80)}); skipping from now on`);
+          break;
+        }
+
+        if (info.status === 429) {
+          const waitMs = info.retryAfterMs ?? Math.min(2000 * 2 ** (attempt - 1), 15000);
+
+          if (waitMs > MAX_RETRY_WAIT_MS) {
+            console.warn(
+              `[groq] ${model.id} quota exhausted (retry in ${Math.round(waitMs / 1000)}s); trying next model`
+            );
+            break;
+          }
+
+          if (attempt < MAX_ATTEMPTS_PER_MODEL) {
+            console.warn(`[groq] ${model.id} rate limited; retrying in ${waitMs}ms`);
+            await sleep(waitMs);
+            continue;
+          }
+          break;
+        }
+
+        // Malformed output is often model-specific — worth trying the next one.
+        console.warn(`[groq] ${model.id} failed: ${info.message.slice(0, 80)}`);
+        break;
       }
+    }
+  }
 
-      const failure = new Error(`Groq API error: ${errorMessage}`) as Error & {
-        status?: number;
-        retryAfterMs?: number;
-      };
-      failure.status = response.status;
+  throw lastError ?? new Error('All Groq models failed');
+}
 
-      const retryAfter = response.headers.get('retry-after');
-      if (retryAfter) {
-        const seconds = Number(retryAfter);
-        if (!Number.isNaN(seconds)) failure.retryAfterMs = Math.ceil(seconds * 1000);
-      }
+async function groqRequestOnce<T = any>(
+  model: ModelSpec,
+  messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>,
+  options?: GroqOptions
+): Promise<T> {
+  const temperature = options?.temperature ?? 0.7;
+  const baseTokens = options?.maxTokens ?? 2000;
+  const maxTokens = Math.round(baseTokens * model.tokenMultiplier);
 
-      throw failure;
+  const response = await fetch(`${GROQ_CONFIG.baseURL}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${GROQ_CONFIG.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: model.id,
+      messages,
+      temperature,
+      max_tokens: maxTokens,
+      response_format: options?.jsonMode ? { type: 'json_object' } : undefined,
+    }),
+  });
+
+  if (!response.ok) {
+    let errorMessage = 'Unknown error';
+    try {
+      const body = await response.json();
+      errorMessage = body.error?.message || JSON.stringify(body);
+    } catch {
+      errorMessage = await response.text();
     }
 
-    const data = await response.json();
+    const failure = new Error(`Groq API error: ${errorMessage}`) as GroqError;
+    failure.status = response.status;
 
-    const used = data.usage?.total_tokens ?? 0;
-    if (used) {
-      tokenLedger.add(used);
-      console.log(
-        `[groq] ${data.usage.prompt_tokens} in + ${data.usage.completion_tokens} out = ${used} tokens (search total ${tokenLedger.total})`
+    const retryAfter = response.headers.get('retry-after');
+    if (retryAfter) {
+      const seconds = Number(retryAfter);
+      if (!Number.isNaN(seconds)) failure.retryAfterMs = Math.ceil(seconds * 1000);
+    }
+
+    throw failure;
+  }
+
+  const data = await response.json();
+
+  const used = data.usage?.total_tokens ?? 0;
+  if (used) {
+    tokenLedger.add(used);
+    console.log(
+      `[groq] ${model.id}: ${data.usage.prompt_tokens} in + ${data.usage.completion_tokens} out = ${used} (search total ${tokenLedger.total})`
+    );
+  }
+
+  const content = data.choices[0]?.message?.content;
+  if (!content) {
+    throw new Error('No content in Groq response');
+  }
+
+  if (options?.jsonMode) {
+    try {
+      return JSON.parse(content) as T;
+    } catch (parseError) {
+      throw new Error(
+        `Failed to parse JSON from ${model.id}: ${
+          parseError instanceof Error ? parseError.message : 'unknown'
+        }`
       );
     }
-
-    const content = data.choices[0]?.message?.content;
-
-    if (!content) {
-      console.error('Groq response structure:', JSON.stringify(data, null, 2));
-      throw new Error('No content in Groq response');
-    }
-
-    if (options?.jsonMode) {
-      try {
-        return JSON.parse(content) as T;
-      } catch (parseError) {
-        console.error('JSON parse error. Content was:', content);
-        throw new Error(`Failed to parse JSON response: ${parseError instanceof Error ? parseError.message : 'Unknown error'}`);
-      }
-    }
-
-    return content as T;
-  } catch (error) {
-    console.error('Groq request failed:', error);
-    throw error;
   }
+
+  return content as T;
 }
 
 export function createSystemMessage(role: string): string {
