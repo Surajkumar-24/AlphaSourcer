@@ -29,23 +29,55 @@
 
 @layer components {
   .card {
-    @apply bg-white rounded-card border border-gray-200 shadow-sm;
+    @apply bg-white rounded-card border border-alphanom-line shadow-card;
+  }
+
+  .card-lift {
+    @apply transition-all duration-200 hover:shadow-lift hover:-translate-y-0.5;
   }
 
   .btn-primary {
-    @apply bg-alphanom-teal hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-card transition-colors;
+    @apply inline-flex items-center justify-center gap-2 bg-alphanom-teal text-white font-jakarta font-semibold
+           py-2.5 px-5 rounded-card shadow-sm transition-all
+           hover:brightness-105 hover:shadow-lift active:translate-y-px
+           disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:shadow-sm;
   }
 
   .btn-secondary {
-    @apply bg-gray-200 hover:bg-gray-300 text-alphanom-navy font-medium py-2 px-4 rounded-card transition-colors;
+    @apply inline-flex items-center justify-center gap-2 bg-white text-alphanom-navy font-jakarta font-medium
+           py-2.5 px-5 rounded-card border border-alphanom-line transition-colors hover:bg-alphanom-bg;
   }
 
   .input-field {
-    @apply w-full px-4 py-2 border border-gray-300 rounded-card focus:outline-none focus:ring-2 focus:ring-alphanom-teal focus:border-transparent;
+    @apply w-full px-4 py-3 bg-white border border-alphanom-line rounded-card text-alphanom-navy
+           placeholder:text-alphanom-muted/70 transition-shadow
+           focus:outline-none focus:ring-4 focus:ring-alphanom-teal/15 focus:border-alphanom-teal;
   }
 
   .badge {
-    @apply inline-block px-3 py-1 rounded-full text-sm font-medium;
+    @apply inline-flex items-center gap-1.5 px-3 py-1 rounded-pill text-xs font-jakarta font-semibold;
+  }
+
+  /* Filter chips */
+  .chip {
+    @apply inline-flex items-center gap-2 px-3.5 py-2 rounded-pill border text-sm font-medium
+           cursor-pointer select-none transition-all;
+  }
+  .chip-on {
+    @apply bg-alphanom-navy text-white border-alphanom-navy shadow-sm;
+  }
+  .chip-off {
+    @apply bg-white text-alphanom-muted border-alphanom-line hover:border-alphanom-navy/30 hover:text-alphanom-navy;
+  }
+
+  /* Avatar initials */
+  .avatar {
+    @apply flex h-9 w-9 shrink-0 items-center justify-center rounded-full
+           bg-alphanom-teal-soft text-alphanom-navy font-jakarta text-xs font-bold;
+  }
+
+  .section-label {
+    @apply font-jakarta text-xs font-semibold uppercase tracking-wider text-alphanom-muted;
   }
 }
 
@@ -66,4 +98,45 @@
 
 ::-webkit-scrollbar-thumb:hover {
   background: #999;
+}
+
+
+/* ---- Waiting-state motion ---- */
+@keyframes logo-pulse {
+  0%, 100% { opacity: 1;    transform: scale(1); }
+  50%      { opacity: 0.72; transform: scale(1.04); }
+}
+.animate-logo-pulse { animation: logo-pulse 2.4s ease-in-out infinite; }
+
+@keyframes float-soft {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-6px); }
+}
+.animate-float-soft { animation: float-soft 4s ease-in-out infinite; }
+
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-rise-in { animation: rise-in 0.35s ease-out both; }
+
+@keyframes shimmer {
+  100% { transform: translateX(100%); }
+}
+.shimmer::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.35), transparent);
+  animation: shimmer 1.8s infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-logo-pulse,
+  .animate-float-soft,
+  .animate-rise-in,
+  .shimmer::after {
+    animation: none;
+  }
 }

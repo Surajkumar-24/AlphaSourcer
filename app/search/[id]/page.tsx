@@ -44,7 +44,11 @@ export default function SearchPage() {
       <Header />
 
       <main className="container mx-auto px-4 py-12 max-w-6xl">
-        {loading && session && session.status !== 'completed' && session.status !== 'failed' ? (
+        {loading && !session && !error ? (
+          <div className="mx-auto max-w-3xl">
+            <div className="shimmer relative h-64 overflow-hidden rounded-card bg-white" />
+          </div>
+        ) : loading && session && session.status !== 'completed' && session.status !== 'failed' ? (
           <SearchProgress session={session} />
         ) : error ? (
           <div className="bg-red-50 border border-red-200 rounded-card p-6 text-red-800">
@@ -56,7 +60,14 @@ export default function SearchPage() {
             <p>{session.error || 'An unknown error occurred'}</p>
           </div>
         ) : session ? (
-          <CandidateResults session={session} />
+          <>
+            {session.warning && (
+              <div className="bg-amber-50 border border-amber-200 rounded-card p-4 mb-6 text-amber-900">
+                {session.warning}
+              </div>
+            )}
+            <CandidateResults session={session} />
+          </>
         ) : null}
       </main>
     </div>

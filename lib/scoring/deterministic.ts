@@ -6,70 +6,93 @@ export function calculateDeterministicScore(
     name: string;
     currentDesignation: string | null;
     currentOrganization: string | null;
+    location?: string | null;
     searchSnippet: string;
   },
   brief: SearchBrief
 ): number {
   const profile = SCORING_PROFILES[brief.roleFamily] || SCORING_PROFILES.Generic;
-  let score = 0;
 
-  // Title Match (25-35%)
-  const titleScore = calculateTitleScore(
-    candidate.currentDesignation,
-    brief.primaryTitle,
-    brief.alternativeTitles,
-    brief.adjacentTitles,
-    brief.excludedTitles
+  // Only dimensions the requirement actually specifies should consume weight.
+  // Otherwise an unspecified dimension contributes a flat 50%, which caps the
+  // achievable score well below the "excellent" band no matter how good the fit.
+  let earned = 0;
+  let applicableWeight = 0;
+
+  const apply = (weight: number, score: number | null) => {
+    if (score === null || weight <= 0) return;
+    earned += (score / 100) * weight;
+    applicableWeight += weight;
+  };
+
+  apply(
+    profile.titleMatch,
+    calculateTitleScore(
+      candidate.currentDesignation,
+      brief.primaryTitle,
+      brief.alternativeTitles,
+      brief.adjacentTitles,
+      brief.excludedTitles
+    )
   );
-  score += (titleScore / 100) * profile.titleMatch;
 
-  // Must-Have Skills Match (30-35%)
-  const skillScore = calculateSkillScore(
-    candidate.currentDesignation,
-    candidate.searchSnippet,
-    brief.mustHaveSkills,
-    brief.goodToHaveSkills
+  apply(
+    profile.mustHaveSkillMatch,
+    brief.mustHaveSkills.length > 0 || brief.goodToHaveSkills.length > 0
+      ? calculateSkillScore(
+          candidate.currentDesignation,
+          candidate.searchSnippet,
+          brief.mustHaveSkills,
+          brief.goodToHaveSkills
+        )
+      : null
   );
-  score += (skillScore / 100) * profile.mustHaveSkillMatch;
 
-  // Experience/Seniority (15-20%)
-  const experienceScore = calculateExperienceScore(
-    candidate.currentDesignation,
-    brief.minExperience,
-    brief.maxExperience
+  apply(
+    profile.experienceSeniority,
+    calculateExperienceScore(candidate.currentDesignation, brief.minExperience, brief.maxExperience)
   );
-  score += (experienceScore / 100) * profile.experienceSeniority;
 
-  // Location (10-15%)
-  const locationScore = calculateLocationScore(
-    candidate.searchSnippet,
-    brief.locations
+  apply(
+    profile.location,
+    brief.locations.length > 0
+      ? calculateLocationScore(`${candidate.location || ''} ${candidate.searchSnippet}`, brief.locations)
+      : null
   );
-  score += (locationScore / 100) * profile.location;
 
-  // Company/Industry (10-15%)
-  const companyScore = calculateCompanyScore(
-    candidate.currentOrganization,
-    brief.preferredCompanies,
-    brief.excludedCompanies
+  apply(
+    profile.companyIndustry,
+    brief.preferredCompanies.length > 0 || brief.excludedCompanies.length > 0
+      ? calculateCompanyScore(
+          candidate.currentOrganization,
+          brief.preferredCompanies,
+          brief.excludedCompanies
+        )
+      : null
   );
-  score += (companyScore / 100) * profile.companyIndustry;
 
-  // Preferences (3-5%)
-  const preferenceScore = calculatePreferenceScore(
-    candidate.searchSnippet,
-    brief.preferredIndustries,
-    brief.excludedIndustries
+  apply(
+    profile.preferences,
+    brief.preferredIndustries.length > 0 || brief.excludedIndustries.length > 0
+      ? calculatePreferenceScore(
+          candidate.searchSnippet,
+          brief.preferredIndustries,
+          brief.excludedIndustries
+        )
+      : null
   );
-  score += (preferenceScore / 100) * profile.preferences;
 
-  // Other signals (2-5%)
-  const signalScore = calculateSignalScore(
-    candidate.searchSnippet,
-    brief.excludeKeywords
+  apply(
+    profile.otherSignals,
+    brief.excludeKeywords.length > 0
+      ? calculateSignalScore(candidate.searchSnippet, brief.excludeKeywords)
+      : null
   );
-  score += (signalScore / 100) * profile.otherSignals;
 
+  if (applicableWeight === 0) return 0;
+
+  // Rescale against the weight that was actually in play.
+  const score = (earned / applicableWeight) * 100;
   return Math.min(100, Math.max(0, score));
 }
 

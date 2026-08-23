@@ -33,6 +33,7 @@ export type Candidate = {
   name: string;
   currentDesignation: string | null;
   currentOrganization: string | null;
+  location: string | null;
   linkedinUrl: string;
   searchSnippet: string;
   sourceQueries: string[];
@@ -60,6 +61,8 @@ export type SearchSession = {
   candidates: Candidate[];
   completedAt?: string;
   error?: string;
+  warning?: string;
+  tokensUsed?: number;
   createdAt: string;
 };
 
@@ -68,4 +71,6 @@ export type SearchResult = {
   url: string;
   snippet: string;
   position: number;
+  // Google renders LinkedIn results with a "Location - Title - Company" subtitle.
+  subtitle?: string;
 };

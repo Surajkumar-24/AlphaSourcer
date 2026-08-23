@@ -1,6 +1,6 @@
 export const AI_MODELS = {
-  primary: process.env.GROQ_PRIMARY_MODEL || 'mixtral-8x7b-32768',
-  extraction: process.env.GROQ_EXTRACTION_MODEL || 'mixtral-8x7b-32768',
+  primary: process.env.GROQ_PRIMARY_MODEL || 'openai/gpt-oss-120b',
+  extraction: process.env.GROQ_EXTRACTION_MODEL || 'openai/gpt-oss-120b',
 };
 
 export const GROQ_CONFIG = {

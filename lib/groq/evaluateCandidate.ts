@@ -10,76 +10,135 @@ export interface CandidateEvaluation {
   reasoningSummary: string;
 }
 
-const EVALUATE_CANDIDATE_PROMPT = `Evaluate candidate relevance to the hiring requirement.
-
-HIRING REQUIREMENT:
-{brief}
-
-CANDIDATE INFORMATION:
-- Name: {name}
-- Current Title: {designation}
-- Current Organization: {organization}
-- Search Snippet: {snippet}
-- Deterministic Score: {deterministicScore}
-
-Based ONLY on available evidence, answer:
-1. How relevant is this candidate to the requirement?
-2. Which requirements are explicitly supported by available information?
-3. Which requirements remain uncertain?
-4. Does the current title match or represent an adjacent role?
-5. How strong is the overall fit?
-
-Return JSON:
-{
-  "contextualScore": 0-100,
-  "matchStrength": "strong|moderate|weak",
-  "confirmedMatches": ["list of confirmed requirement matches"],
-  "uncertainRequirements": ["list of requirements without clear evidence"],
-  "mismatchFlags": ["list of potential mismatches or concerns"],
-  "reasoningSummary": "2-3 sentence explanation of scoring"
+export interface EvaluationInput {
+  name: string;
+  designation: string | null;
+  organization: string | null;
+  location: string | null;
+  snippet: string;
+  deterministicScore: number;
 }
 
-CRITICAL RULES:
-- Score only on available evidence
-- Missing information ≠ mismatch
-- Be conservative with strong ratings
-- Mark uncertain fields as such
-- Distinguish confirmed from inferred`;
+/**
+ * The full SearchBrief JSON runs ~700 tokens. Sending it once per batch as a
+ * short digest — rather than once per candidate — is what keeps a search
+ * inside the free tier's tokens-per-minute ceiling.
+ */
+function compactBrief(brief: SearchBrief): string {
+  const lines: string[] = [];
+  const add = (label: string, value: string | null | undefined) => {
+    if (value) lines.push(`${label}: ${value}`);
+  };
 
-export async function evaluateCandidate(
+  add('Target title', brief.primaryTitle);
+  add('Also acceptable', [...brief.alternativeTitles, ...brief.adjacentTitles].join(', '));
+  add('Must-have skills', brief.mustHaveSkills.join(', '));
+  add('Nice-to-have skills', brief.goodToHaveSkills.join(', '));
+  if (brief.minExperience || brief.maxExperience) {
+    add('Experience', `${brief.minExperience ?? '?'}-${brief.maxExperience ?? '?'} years`);
+  }
+  add('Locations', brief.locations.join(', '));
+  add('Non-negotiables', brief.nonNegotiables.join('; '));
+  add('Avoid', [...brief.excludedTitles, ...brief.excludeKeywords].join(', '));
+
+  return lines.join('\n');
+}
+
+const BATCH_PROMPT = `Score each candidate against the hiring requirement.
+
+REQUIREMENT:
+{brief}
+
+CANDIDATES:
+{candidates}
+
+Return ONLY a JSON object. Include one entry per candidate, keeping "index" as given:
+
+{
+  "evaluations": [
+    {
+      "index": 0,
+      "contextualScore": 75,
+      "matchStrength": "strong",
+      "confirmedMatches": ["evidence-backed match"],
+      "uncertainRequirements": ["requirement with no evidence"],
+      "mismatchFlags": [],
+      "reasoningSummary": "One or two sentences."
+    }
+  ]
+}
+
+RULES:
+- Score 0-100 on available evidence only
+- matchStrength: "strong", "moderate", or "weak"
+- Missing information is NOT a mismatch
+- Be conservative; do not invent experience the text does not show
+- Return an entry for every candidate index provided
+- Keep output tight: at most 3 short items per list, reasoningSummary under 20 words`;
+
+function describe(candidate: EvaluationInput, index: number): string {
+  return [
+    `[${index}]`,
+    `name: ${candidate.name}`,
+    `title: ${candidate.designation || 'Unknown'}`,
+    `company: ${candidate.organization || 'Unknown'}`,
+    `location: ${candidate.location || 'Unknown'}`,
+    `profile text: ${(candidate.snippet || '').slice(0, 140)}`,
+  ].join(' | ');
+}
+
+function fallback(candidate: EvaluationInput): CandidateEvaluation {
+  return {
+    contextualScore: candidate.deterministicScore,
+    matchStrength: 'moderate',
+    confirmedMatches: [],
+    uncertainRequirements: [],
+    mismatchFlags: [],
+    reasoningSummary: 'Scored on profile signals only; AI review unavailable.',
+  };
+}
+
+/**
+ * Evaluates a group of candidates in a single request. Returns results aligned
+ * to the input order, falling back to the deterministic score for any candidate
+ * the model omits.
+ */
+export async function evaluateCandidatesBatch(
   brief: SearchBrief,
-  candidateName: string,
-  designation: string | null,
-  organization: string | null,
-  snippet: string,
-  deterministicScore: number
-): Promise<CandidateEvaluation> {
-  const briefJson = JSON.stringify(brief, null, 2);
-  const prompt = EVALUATE_CANDIDATE_PROMPT.replace('{brief}', briefJson)
-    .replace('{name}', candidateName)
-    .replace('{designation}', designation || 'Unknown')
-    .replace('{organization}', organization || 'Unknown')
-    .replace('{snippet}', snippet)
-    .replace('{deterministicScore}', deterministicScore.toString());
+  candidates: EvaluationInput[]
+): Promise<CandidateEvaluation[]> {
+  if (candidates.length === 0) return [];
 
-  const messages = [
-    {
-      role: 'system' as const,
-      content: createSystemMessage(
-        'recruitment researcher evaluating candidate-requirement fit with emphasis on evidence-based assessment'
-      ),
-    },
-    {
-      role: 'user' as const,
-      content: prompt,
-    },
-  ];
+  const prompt = BATCH_PROMPT.replace('{brief}', compactBrief(brief)).replace(
+    '{candidates}',
+    candidates.map(describe).join('\n')
+  );
 
-  const result = await groqRequest<CandidateEvaluation>(messages, {
-    temperature: 0.3,
-    maxTokens: 1000,
-    jsonMode: true,
-  });
+  const response = await groqRequest<{ evaluations?: Array<CandidateEvaluation & { index?: number }> }>(
+    [
+      {
+        role: 'system' as const,
+        content: createSystemMessage(
+          'recruitment researcher evaluating candidate-requirement fit with emphasis on evidence-based assessment'
+        ),
+      },
+      { role: 'user' as const, content: prompt },
+    ],
+    { temperature: 0.3, maxTokens: 2500, jsonMode: true }
+  );
 
-  return result;
+  const byIndex = new Map<number, CandidateEvaluation>();
+  for (const entry of response?.evaluations ?? []) {
+    if (typeof entry?.index !== 'number') continue;
+    byIndex.set(entry.index, {
+      contextualScore: Number(entry.contextualScore) || 0,
+      matchStrength: entry.matchStrength || 'moderate',
+      confirmedMatches: entry.confirmedMatches ?? [],
+      uncertainRequirements: entry.uncertainRequirements ?? [],
+      mismatchFlags: entry.mismatchFlags ?? [],
+      reasoningSummary: entry.reasoningSummary ?? '',
+    });
+  }
+
+  return candidates.map((candidate, i) => byIndex.get(i) ?? fallback(candidate));
 }

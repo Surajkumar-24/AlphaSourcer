@@ -18,7 +18,7 @@ export async function POST(request: NextRequest) {
     const excelBuffer = await generateExcelFile(candidates, roleName);
     const fileName = getExcelFileName(roleName);
 
-    return new NextResponse(excelBuffer, {
+    return new NextResponse(Buffer.from(excelBuffer), {
       headers: {
         'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         'Content-Disposition': `attachment; filename="${fileName}"`,

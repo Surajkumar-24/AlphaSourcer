@@ -19,12 +19,14 @@ export async function generateExcelFile(
 
   // Add data rows
   candidates.forEach((candidate, index) => {
+    const url = candidate.linkedinUrl?.trim();
     worksheet.addRow({
       srNo: index + 1,
       name: candidate.name,
       designation: candidate.currentDesignation || '-',
       organization: candidate.currentOrganization || '-',
-      url: candidate.linkedinUrl,
+      // A hyperlink value keeps the URL readable and clickable; `cell.hyperlink` is read-only
+      url: url ? { text: url, hyperlink: url, tooltip: 'Open LinkedIn profile' } : '-',
     });
   });
 
@@ -32,18 +34,15 @@ export async function generateExcelFile(
   const headerRow = worksheet.getRow(1);
   headerRow.font = { bold: true, color: { argb: 'FF0B1F3A' } };
   headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF6F6FB' } };
-  headerRow.alignment = { horizontal: 'center', vertical: 'center' };
+  headerRow.alignment = { horizontal: 'center', vertical: 'middle' };
 
-  // Make LinkedIn URLs clickable
+  // Style URL cells that are actual links
   worksheet.eachRow((row, rowNumber) => {
     if (rowNumber > 1) {
       const urlCell = row.getCell('url');
-      urlCell.hyperlink = {
-        text: 'View Profile',
-        tooltip: 'Click to open LinkedIn profile',
-        target: urlCell.value as string,
-      };
-      urlCell.font = { color: { argb: 'FF00B4A6' }, underline: 'single' };
+      if (urlCell.type === ExcelJS.ValueType.Hyperlink) {
+        urlCell.font = { color: { argb: 'FF00B4A6' }, underline: 'single' };
+      }
     }
   });
 

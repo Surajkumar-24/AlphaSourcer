@@ -1,86 +1,107 @@
 import { SearchSession, Candidate, SearchBrief } from '@/types/index';
 import { parseRequirement } from '@/lib/groq/parseRequirement';
 import { generateQueries } from '@/lib/groq/generateQueries';
-import { serperSearch, isLinkedInProfileUrl } from '@/lib/serper/search';
-import { extractCandidate } from '@/lib/groq/extractCandidate';
-import { evaluateCandidate } from '@/lib/groq/evaluateCandidate';
+import { serperSearchPaged, isLinkedInProfileUrl } from '@/lib/serper/search';
+import { parseSearchResult } from '@/lib/candidates/parseSearchResult';
+import { evaluateCandidatesBatch, EvaluationInput } from '@/lib/groq/evaluateCandidate';
 import { calculateDeterministicScore } from '@/lib/scoring/deterministic';
 import { deduplicateCandidates } from '@/lib/candidates/deduplicate';
 import { LIMITS } from '@/config/limits';
 import { MATCH_STRENGTH_RANGES, FINAL_SCORE_WEIGHTS } from '@/config/scoring';
 import { nanoid } from '@/lib/utils';
+import type { SessionStore } from '@/lib/session-store';
+import { tokenLedger } from '@/lib/groq/client';
 
 export async function processSearchPipeline(
   sessionId: string,
   requirement: string,
   advancedFilters: any,
-  activeSessions: Map<string, SearchSession>
+  sessionStore: SessionStore
 ) {
-  const session = activeSessions.get(sessionId)!;
+  let session = await sessionStore.get(sessionId);
+  if (!session) {
+    throw new Error('Session not found');
+  }
+
+  // Single-user local tool: one search at a time, so a module-level ledger is fine.
+  tokenLedger.reset();
 
   try {
     // Stage 1: Parse Requirement
     session.status = 'analyzing';
-    activeSessions.set(sessionId, session);
+    await sessionStore.set(sessionId, session);
 
     const searchBrief = await parseRequirement(requirement);
     session.searchBrief = searchBrief;
     session.status = 'generating_queries';
-    activeSessions.set(sessionId, session);
+    await sessionStore.set(sessionId, session);
 
     // Stage 2: Generate Queries
     const queries = await generateQueries(searchBrief);
     session.generatedQueries = queries;
     session.status = 'searching';
-    activeSessions.set(sessionId, session);
+    await sessionStore.set(sessionId, session);
 
     // Stage 3: Search with Serper
+    // Queries run concurrently — 8 sequential paged fetches dominated total
+    // runtime and would blow past a serverless function's duration limit.
+    const searches = await Promise.allSettled(
+      queries.map(async (query) => ({
+        query,
+        results: await serperSearchPaged(query.query, LIMITS.resultPagesPerQuery),
+      }))
+    );
+
     const allResults = [];
-    for (const query of queries) {
-      try {
-        const results = await serperSearch(query.query);
-        for (const result of results) {
-          if (isLinkedInProfileUrl(result.url)) {
-            allResults.push({
-              ...result,
-              queryId: query.id,
-              queryFamily: query.family,
-            });
-          }
-        }
-      } catch (error) {
-        console.error(`Query ${query.id} failed:`, error);
+    let lastSearchError: unknown = null;
+    let successfulQueries = 0;
+
+    for (const outcome of searches) {
+      if (outcome.status === 'rejected') {
+        lastSearchError = outcome.reason;
+        console.error('Query failed:', outcome.reason);
+        continue;
       }
+
+      successfulQueries++;
+      const { query, results } = outcome.value;
+      for (const result of results) {
+        if (isLinkedInProfileUrl(result.url)) {
+          allResults.push({ ...result, queryId: query.id, queryFamily: query.family });
+        }
+      }
+    }
+
+    if (successfulQueries === 0) {
+      throw new Error(
+        `All ${queries.length} searches failed. ${lastSearchError instanceof Error ? lastSearchError.message : ''}`
+      );
     }
 
     session.totalResultsFound = allResults.length;
     session.status = 'deduplicating';
-    activeSessions.set(sessionId, session);
+    await sessionStore.set(sessionId, session);
 
     // Stage 4: Extract Candidate Information
+    // Serper returns name/title/company structurally, so this needs no LLM call
+    // and therefore cannot be throttled away by the token budget.
     const rawCandidates: Partial<Candidate>[] = [];
 
     for (const result of allResults) {
-      try {
-        const extraction = await extractCandidate(result.title, result.snippet, result.url);
+      const parsed = parseSearchResult(result);
 
-        if (extraction.extractionConfidence < 30) {
-          continue; // Skip low-confidence extractions
-        }
-
-        rawCandidates.push({
-          name: extraction.name,
-          currentDesignation: extraction.currentDesignation,
-          currentOrganization: extraction.currentOrganization,
-          linkedinUrl: result.url,
-          searchSnippet: result.snippet,
-          sourceQueries: [result.queryId],
-          queryFamilies: [result.queryFamily],
-          extractionConfidence: extraction.extractionConfidence,
-        });
-      } catch (error) {
-        console.error('Extraction failed:', error);
-      }
+      rawCandidates.push({
+        id: nanoid(),
+        name: parsed.name,
+        currentDesignation: parsed.currentDesignation,
+        currentOrganization: parsed.currentOrganization,
+        location: parsed.location,
+        linkedinUrl: result.url,
+        searchSnippet: result.snippet,
+        sourceQueries: [result.queryId],
+        queryFamilies: [result.queryFamily],
+        extractionConfidence: parsed.extractionConfidence,
+      });
     }
 
     // Stage 5: Deduplicate
@@ -89,75 +110,104 @@ export async function processSearchPipeline(
 
     // Stage 6: Score Candidates
     session.status = 'scoring';
-    activeSessions.set(sessionId, session);
+    await sessionStore.set(sessionId, session);
+
+    // Deterministic scoring is free, so every candidate gets one.
+    const ranked = deduplicatedCandidates
+      .map((candidate) => ({
+        candidate,
+        deterministicScore: calculateDeterministicScore(candidate, searchBrief),
+      }))
+      .sort((a, b) => b.deterministicScore - a.deterministicScore);
+
+    const forReview = ranked.slice(0, LIMITS.maxCandidatesForEvaluation);
+    const remainder = ranked.slice(LIMITS.maxCandidatesForEvaluation);
 
     const scoredCandidates: Candidate[] = [];
+    let evaluationFailures = 0;
 
-    for (const candidate of deduplicatedCandidates.slice(0, LIMITS.maxCandidatesForEvaluation)) {
+    for (let i = 0; i < forReview.length; i += LIMITS.evaluationBatchSize) {
+      const batch = forReview.slice(i, i + LIMITS.evaluationBatchSize);
+      const inputs: EvaluationInput[] = batch.map(({ candidate, deterministicScore }) => ({
+        name: candidate.name,
+        designation: candidate.currentDesignation,
+        organization: candidate.currentOrganization,
+        location: candidate.location,
+        snippet: candidate.searchSnippet,
+        deterministicScore,
+      }));
+
+      let evaluations;
       try {
-        // Deterministic score
-        const deterministicScore = calculateDeterministicScore(candidate, searchBrief!);
+        evaluations = await evaluateCandidatesBatch(searchBrief, inputs);
+      } catch (error) {
+        console.error('Batch evaluation failed:', error);
+        evaluationFailures += batch.length;
+        evaluations = null;
+      }
 
-        // AI Contextual evaluation
-        const contextualEvaluation = await evaluateCandidate(
-          searchBrief!,
-          candidate.name,
-          candidate.currentDesignation,
-          candidate.currentOrganization,
-          candidate.searchSnippet,
-          deterministicScore
-        );
-
-        // Final score
+      batch.forEach(({ candidate, deterministicScore }, index) => {
+        const evaluation = evaluations?.[index];
+        const contextualScore = evaluation?.contextualScore ?? deterministicScore;
         const finalScore =
           deterministicScore * FINAL_SCORE_WEIGHTS.deterministic +
-          contextualEvaluation.contextualScore * FINAL_SCORE_WEIGHTS.contextual;
-
-        const matchStrength = getMatchStrengthFromScore(finalScore);
-
-        const scoredCandidate: Candidate = {
-          ...candidate,
-          deterministicScore,
-          contextualScore: contextualEvaluation.contextualScore,
-          finalScore,
-          matchStrength,
-          confirmedMatches: contextualEvaluation.confirmedMatches,
-          uncertainRequirements: contextualEvaluation.uncertainRequirements,
-          mismatchFlags: contextualEvaluation.mismatchFlags,
-          reasoningSummary: contextualEvaluation.reasoningSummary,
-          selected: false,
-        };
-
-        scoredCandidates.push(scoredCandidate);
-      } catch (error) {
-        console.error('Scoring failed for candidate:', error);
-        // Still include candidate with deterministic score only
-        const deterministicScore = calculateDeterministicScore(candidate, searchBrief!);
-        const matchStrength = getMatchStrengthFromScore(deterministicScore);
+          contextualScore * FINAL_SCORE_WEIGHTS.contextual;
 
         scoredCandidates.push({
           ...candidate,
           deterministicScore,
-          contextualScore: deterministicScore,
-          finalScore: deterministicScore,
-          matchStrength,
+          contextualScore,
+          finalScore,
+          matchStrength: getMatchStrengthFromScore(finalScore),
+          confirmedMatches: evaluation?.confirmedMatches ?? [],
+          uncertainRequirements: evaluation?.uncertainRequirements ?? [],
+          mismatchFlags: evaluation?.mismatchFlags ?? [],
+          reasoningSummary:
+            evaluation?.reasoningSummary ||
+            'Scored on profile signals only; AI review unavailable.',
           selected: false,
         });
-      }
+      });
+
+      session.candidates = [...scoredCandidates].sort((a, b) => b.finalScore - a.finalScore);
+      await sessionStore.set(sessionId, session);
+    }
+
+    // Anyone past the review cut still ships, ranked on deterministic signals.
+    for (const { candidate, deterministicScore } of remainder) {
+      scoredCandidates.push({
+        ...candidate,
+        deterministicScore,
+        contextualScore: deterministicScore,
+        finalScore: deterministicScore,
+        matchStrength: getMatchStrengthFromScore(deterministicScore),
+        confirmedMatches: [],
+        uncertainRequirements: [],
+        mismatchFlags: [],
+        reasoningSummary: 'Ranked on profile signals; not AI-reviewed.',
+        selected: false,
+      });
+    }
+
+    if (evaluationFailures > 0) {
+      session.warning =
+        `${evaluationFailures} candidate(s) were ranked on profile signals only — ` +
+        `the AI review step hit its rate limit. Ranking is still valid, just less nuanced.`;
     }
 
     // Sort by final score
     scoredCandidates.sort((a, b) => b.finalScore - a.finalScore);
 
     session.candidates = scoredCandidates;
+    session.tokensUsed = tokenLedger.total;
     session.status = 'completed';
     session.completedAt = new Date().toISOString();
-    activeSessions.set(sessionId, session);
+    await sessionStore.set(sessionId, session);
   } catch (error) {
     console.error('Pipeline error:', error);
     session.status = 'failed';
     session.error = error instanceof Error ? error.message : 'Unknown error';
-    activeSessions.set(sessionId, session);
+    await sessionStore.set(sessionId, session);
   }
 }
 

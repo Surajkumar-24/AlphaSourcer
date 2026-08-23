@@ -24,6 +24,9 @@ export function deduplicateCandidates(candidates: Partial<Candidate>[]): Candida
       if (candidate.currentOrganization && !existing.currentOrganization) {
         existing.currentOrganization = candidate.currentOrganization;
       }
+      if (candidate.location && !existing.location) {
+        existing.location = candidate.location;
+      }
       // Merge source queries
       if (candidate.sourceQueries) {
         existing.sourceQueries = [...new Set([...existing.sourceQueries, ...candidate.sourceQueries])];
@@ -35,10 +38,11 @@ export function deduplicateCandidates(candidates: Partial<Candidate>[]): Candida
     }
 
     const fullCandidate: Candidate = {
-      id: nanoid(),
+      id: candidate.id || nanoid(),
       name: candidate.name || 'Unknown',
       currentDesignation: candidate.currentDesignation || null,
       currentOrganization: candidate.currentOrganization || null,
+      location: candidate.location || null,
       linkedinUrl: normalizedUrl,
       searchSnippet: candidate.searchSnippet || '',
       sourceQueries: candidate.sourceQueries || [],

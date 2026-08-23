@@ -6,37 +6,37 @@ const PARSE_REQUIREMENT_PROMPT = `Analyze the hiring requirement and extract a s
 REQUIREMENT:
 {requirement}
 
-Return a JSON object with this exact structure:
+Return ONLY a valid JSON object (no markdown, no extra text) with this exact structure. Use null for missing values, empty arrays for empty lists:
+
 {
-  "primaryTitle": "string or null",
-  "alternativeTitles": ["array of alternative titles"],
-  "adjacentTitles": ["array of adjacent/feeder roles"],
-  "roleFamily": "Technology|Sales|Recruitment|Finance|Operations|Marketing|Product|Design|Customer Success|Generic",
-  "mustHaveSkills": ["array of must-have skills"],
-  "goodToHaveSkills": ["array of good-to-have skills"],
-  "skillSynonyms": {"skill": ["synonym1", "synonym2"]},
-  "minExperience": number or null,
-  "maxExperience": number or null,
-  "locations": ["array of primary locations"],
-  "locationVariants": ["array of location name variants"],
-  "preferredCompanies": ["array of preferred companies"],
-  "excludedCompanies": ["array of companies to exclude"],
-  "preferredIndustries": ["array of preferred industries"],
-  "excludedIndustries": ["array of industries to exclude"],
-  "excludedTitles": ["array of titles to exclude"],
-  "excludeKeywords": ["array of keywords that indicate wrong candidate"],
-  "nonNegotiables": ["array of critical requirements"],
-  "candidateSummary": "brief description of ideal candidate",
-  "searchStrategySummary": "summary of sourcing approach"
+  "primaryTitle": "primary job title or null",
+  "alternativeTitles": [],
+  "adjacentTitles": [],
+  "roleFamily": "Technology",
+  "mustHaveSkills": [],
+  "goodToHaveSkills": [],
+  "skillSynonyms": {},
+  "minExperience": null,
+  "maxExperience": null,
+  "locations": [],
+  "locationVariants": [],
+  "preferredCompanies": [],
+  "excludedCompanies": [],
+  "preferredIndustries": [],
+  "excludedIndustries": [],
+  "excludedTitles": [],
+  "excludeKeywords": [],
+  "nonNegotiables": [],
+  "candidateSummary": "brief description",
+  "searchStrategySummary": "sourcing approach summary"
 }
 
-IMPORTANT RULES:
-- Never invent requirements not in the original requirement
-- Mark inferred information with reasoning
-- Use null for missing required information
-- Keep arrays empty if no items apply
-- Focus on precision over expansion
-- Location should be normalized (e.g., "Bangalore" not "Blr")`;
+RULES:
+- Extract ONLY information explicitly stated
+- Use null for missing values (not empty strings)
+- Keep arrays empty if no items found
+- Location normalized (e.g., "Bangalore" not "Blr")
+- roleFamily: must be one of: Technology, Sales, Recruitment, Finance, Operations, Marketing, Product, Design, Customer Success, Generic`;
 
 export async function parseRequirement(requirement: string): Promise<SearchBrief> {
   const prompt = PARSE_REQUIREMENT_PROMPT.replace('{requirement}', requirement);
@@ -54,7 +54,7 @@ export async function parseRequirement(requirement: string): Promise<SearchBrief
 
   const result = await groqRequest<SearchBrief>(messages, {
     temperature: 0.3,
-    maxTokens: 2000,
+    maxTokens: 1600,
     jsonMode: true,
   });
 

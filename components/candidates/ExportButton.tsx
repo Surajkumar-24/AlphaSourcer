@@ -53,11 +53,12 @@ export default function ExportButton({ candidates, roleName }: ExportButtonProps
       <button
         onClick={handleExport}
         disabled={loading || candidates.length === 0}
-        className={`btn-primary font-jakarta font-semibold ${candidates.length === 0 ? 'opacity-50 cursor-not-allowed' : ''}`}
+        className="inline-flex items-center gap-2 rounded-card bg-white px-5 py-3 font-jakarta font-semibold text-alphanom-navy shadow-lift transition-all hover:brightness-95 active:translate-y-px disabled:cursor-not-allowed disabled:opacity-45"
       >
-        {loading ? 'Exporting...' : `Export (${candidates.length})`}
+        <span aria-hidden>⬇</span>
+        {loading ? 'Preparing…' : `Export ${candidates.length} to Excel`}
       </button>
-      {error && <p className="text-red-600 text-sm mt-2">{error}</p>}
+      {error && <p className="mt-2 text-sm text-rose-200">{error}</p>}
     </div>
   );
 }

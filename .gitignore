@@ -8,3 +8,9 @@ build/
 .DS_Store
 *.pem
 .vercel
+
+# Runtime search sessions
+.sessions/
+
+# TypeScript incremental build cache
+*.tsbuildinfo

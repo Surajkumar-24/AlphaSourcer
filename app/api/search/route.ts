@@ -1,9 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { waitUntil } from '@vercel/functions';
 import { SearchSession } from '@/types/index';
 import { nanoid } from '@/lib/utils';
 import { processSearchPipeline } from '@/lib/search/pipeline';
+import { createSessionStore } from '@/lib/session-store';
 
-const activeSessions = new Map<string, SearchSession>();
+// The pipeline runs after the response is sent, so the function must stay
+// alive well past the default limit. 60s is the Hobby ceiling; Pro allows 300.
+export const maxDuration = 60;
+export const dynamic = 'force-dynamic';
 
 export async function POST(request: NextRequest) {
   try {
@@ -18,6 +23,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Requirement too long' }, { status: 400 });
     }
 
+    const sessionStore = createSessionStore();
     const sessionId = nanoid();
     const session: SearchSession = {
       id: sessionId,
@@ -31,35 +37,41 @@ export async function POST(request: NextRequest) {
       createdAt: new Date().toISOString(),
     };
 
-    activeSessions.set(sessionId, session);
+    await sessionStore.set(sessionId, session);
 
-    // Start pipeline in background
-    processSearchPipeline(sessionId, requirement, advancedFilters, activeSessions).catch((error) => {
-      console.error('Pipeline error:', error);
-      const sess = activeSessions.get(sessionId);
-      if (sess) {
-        sess.status = 'failed';
-        sess.error = error.message;
-      }
-    });
+    // waitUntil keeps the serverless function running after the response is
+    // returned; without it the pipeline would be frozen mid-flight.
+    waitUntil(
+      processSearchPipeline(sessionId, requirement, advancedFilters, sessionStore).catch(
+        async (error) => {
+          console.error('Pipeline error:', error);
+          const current = await sessionStore.get(sessionId);
+          if (current) {
+            current.status = 'failed';
+            current.error = error?.message || 'Unknown error occurred';
+            await sessionStore.set(sessionId, current);
+          }
+        }
+      )
+    );
 
     return NextResponse.json({ sessionId });
   } catch (error) {
     console.error('Search POST error:', error);
-    return NextResponse.json({ error: 'Failed to start search' }, { status: 500 });
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return NextResponse.json({ error: `Failed to start search: ${message}` }, { status: 500 });
   }
 }
 
 export async function GET(request: NextRequest) {
   try {
-    const searchParams = request.nextUrl.searchParams;
-    const sessionId = searchParams.get('sessionId');
+    const sessionId = request.nextUrl.searchParams.get('sessionId');
 
     if (!sessionId) {
       return NextResponse.json({ error: 'Missing sessionId' }, { status: 400 });
     }
 
-    const session = activeSessions.get(sessionId);
+    const session = await createSessionStore().get(sessionId);
 
     if (!session) {
       return NextResponse.json({ error: 'Session not found' }, { status: 404 });
@@ -68,6 +80,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json(session);
   } catch (error) {
     console.error('Search GET error:', error);
-    return NextResponse.json({ error: 'Failed to fetch search' }, { status: 500 });
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return NextResponse.json({ error: `Failed to fetch search: ${message}` }, { status: 500 });
   }
 }

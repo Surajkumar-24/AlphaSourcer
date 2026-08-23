@@ -1,7 +1,7 @@
 import { SearchResult } from '@/types/index';
 import { SERPER_CONFIG } from '@/config/models';
 
-export async function serperSearch(query: string): Promise<SearchResult[]> {
+export async function serperSearch(query: string, page?: number): Promise<SearchResult[]> {
   if (!SERPER_CONFIG.apiKey) {
     throw new Error('SERPER_API_KEY not configured');
   }
@@ -15,14 +15,16 @@ export async function serperSearch(query: string): Promise<SearchResult[]> {
       },
       body: JSON.stringify({
         q: query,
-        num: 50,
+        // Free Serper accounts reject num > 10; depth comes from paging instead.
+        num: 10,
         type: 'search',
+        ...(page && page > 1 ? { page } : {}),
       }),
     });
 
     if (!response.ok) {
       const error = await response.json();
-      throw new Error(`Serper API error: ${error.error || 'Unknown error'}`);
+      throw new Error(`Serper API error: ${error.message || error.error || 'Unknown error'}`);
     }
 
     const data = await response.json();
@@ -32,12 +34,39 @@ export async function serperSearch(query: string): Promise<SearchResult[]> {
       title: result.title || '',
       url: result.link || '',
       snippet: result.snippet || '',
+      subtitle: result.subtitle || '',
       position: result.position || 0,
     }));
   } catch (error) {
     console.error('Serper search failed:', error);
     throw error;
   }
+}
+
+/**
+ * Walks several result pages for one query. Free-tier Serper caps a single
+ * response at 10 results, so paging is the only way to reach useful recall.
+ */
+export async function serperSearchPaged(
+  query: string,
+  pages: number
+): Promise<SearchResult[]> {
+  const collected: SearchResult[] = [];
+  let firstError: unknown = null;
+
+  for (let page = 1; page <= pages; page++) {
+    try {
+      const results = await serperSearch(query, page);
+      if (results.length === 0) break; // exhausted this query
+      collected.push(...results);
+    } catch (error) {
+      if (page === 1) firstError = error;
+      break; // a failed page means deeper pages are not worth attempting
+    }
+  }
+
+  if (collected.length === 0 && firstError) throw firstError;
+  return collected;
 }
 
 export function isLinkedInProfileUrl(url: string): boolean {
