@@ -51,18 +51,20 @@ export async function serperSearchPaged(
   query: string,
   pages: number
 ): Promise<SearchResult[]> {
+  // Pages are fetched concurrently rather than in sequence. Sequential paging
+  // made depth cost wall-clock time, which is the scarce resource on a
+  // serverless function; in parallel, more pages cost only Serper credits.
+  const requests = Array.from({ length: pages }, (_, i) =>
+    serperSearch(query, i + 1)
+  );
+
+  const settled = await Promise.allSettled(requests);
   const collected: SearchResult[] = [];
   let firstError: unknown = null;
 
-  for (let page = 1; page <= pages; page++) {
-    try {
-      const results = await serperSearch(query, page);
-      if (results.length === 0) break; // exhausted this query
-      collected.push(...results);
-    } catch (error) {
-      if (page === 1) firstError = error;
-      break; // a failed page means deeper pages are not worth attempting
-    }
+  for (const outcome of settled) {
+    if (outcome.status === 'fulfilled') collected.push(...outcome.value);
+    else if (!firstError) firstError = outcome.reason;
   }
 
   if (collected.length === 0 && firstError) throw firstError;

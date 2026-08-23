@@ -51,14 +51,90 @@ export function tokenize(text: string): Set<string> {
   return new Set(tokens);
 }
 
-/** Distinctive words from the target titles — "backend", "engineer", "ontologist". */
-function titleTokens(brief: SearchBrief): { core: Set<string>; alternates: Set<string> } {
+/**
+ * Alternative titles name the SAME job ("Ontologist" ~ "Taxonomist") and stand
+ * on their own. Adjacent titles are neighbouring roles people move in from
+ * ("Data Scientist"), which are only in scope with corroborating skills —
+ * treating the two alike floods the shortlist with the wrong profession.
+ */
+function titleTokens(brief: SearchBrief): {
+  core: Set<string>;
+  alternates: Set<string>;
+  feeders: Set<string>;
+} {
   const core = tokenize(brief.primaryTitle || '');
   const alternates = new Set<string>();
-  for (const title of [...brief.alternativeTitles, ...brief.adjacentTitles]) {
+  const feeders = new Set<string>();
+
+  for (const title of brief.alternativeTitles) {
     tokenize(title).forEach((t) => alternates.add(t));
   }
-  return { core, alternates };
+  for (const title of brief.adjacentTitles) {
+    tokenize(title).forEach((t) => {
+      if (!alternates.has(t)) feeders.add(t);
+    });
+  }
+  return { core, alternates, feeders };
+}
+
+// Cities that imply their country, so "Bangalore" in a brief still accepts a
+// profile listed as "Bengaluru, Karnataka, India".
+const CITY_COUNTRY: Record<string, string> = {
+  bangalore: 'india', bengaluru: 'india', mumbai: 'india', bombay: 'india',
+  delhi: 'india', gurgaon: 'india', gurugram: 'india', noida: 'india',
+  hyderabad: 'india', chennai: 'india', pune: 'india', kolkata: 'india',
+  ahmedabad: 'india', jaipur: 'india', kochi: 'india', indore: 'india',
+  london: 'united kingdom', manchester: 'united kingdom',
+  singapore: 'singapore', dubai: 'united arab emirates',
+  berlin: 'germany', munich: 'germany', paris: 'france',
+  toronto: 'canada', vancouver: 'canada', sydney: 'australia', melbourne: 'australia',
+};
+
+const CITY_ALIASES: Record<string, string[]> = {
+  bangalore: ['bengaluru'], bengaluru: ['bangalore'],
+  mumbai: ['bombay'], bombay: ['mumbai'],
+  gurgaon: ['gurugram'], gurugram: ['gurgaon'],
+};
+
+/** Location terms the brief will accept, expanded with implied countries and aliases. */
+function acceptedLocations(brief: SearchBrief): Set<string> {
+  const accepted = new Set<string>();
+  for (const raw of [...brief.locations, ...brief.locationVariants]) {
+    const loc = normalize(raw);
+    if (!loc) continue;
+    accepted.add(loc);
+    if (CITY_COUNTRY[loc]) accepted.add(CITY_COUNTRY[loc]);
+    for (const alias of CITY_ALIASES[loc] ?? []) accepted.add(alias);
+  }
+  return accepted;
+}
+
+/**
+ * Only rejects a location we can positively identify as elsewhere. An unknown
+ * or unparseable location is never treated as a mismatch.
+ */
+export function locationMismatch(
+  candidateLocation: string | null | undefined,
+  brief: SearchBrief
+): boolean {
+  const accepted = acceptedLocations(brief);
+  if (accepted.size === 0) return false;
+
+  const loc = normalize(candidateLocation || '');
+  if (!loc) return false;
+
+  for (const term of accepted) {
+    if (loc.includes(term)) return false;
+  }
+
+  // No direct hit. Fall back to the city the profile names, in case the brief
+  // targets a country and the profile only lists a city.
+  for (const part of loc.split(' ')) {
+    const country = CITY_COUNTRY[part];
+    if (country && accepted.has(country)) return false;
+  }
+
+  return true;
 }
 
 /** Tolerates singular/plural drift: brief says "knowledge graphs", title says "knowledge graph". */
@@ -87,15 +163,27 @@ export function assessRelevance(
     name: string;
     currentDesignation: string | null;
     currentOrganization: string | null;
+    location?: string | null;
     searchSnippet: string;
   },
   brief: SearchBrief
 ): RelevanceVerdict {
+  const candidateLocation = candidate.location || null;
   const roleName = brief.primaryTitle || 'Role';
   const designation = candidate.currentDesignation || '';
-  const { core, alternates } = titleTokens(brief);
+  const { core, alternates, feeders } = titleTokens(brief);
 
   const label = (tier: string) => `${tier} - ${roleName}`;
+
+  // Wrong geography outranks every other signal.
+  if (locationMismatch(candidateLocation, brief)) {
+    return {
+      tier: 'excluded',
+      tierLabel: 'Removed',
+      reason: `Based in ${candidateLocation} - outside ${brief.locations.join('/')}`,
+      keep: false,
+    };
+  }
 
   // A designation is required; without one there is nothing to judge against.
   if (!designation.trim()) {
@@ -119,6 +207,7 @@ export function assessRelevance(
   const titleSet = tokenize(designation);
   const coreMatches = [...core].filter((t) => titleSet.has(t));
   const altMatches = [...alternates].filter((t) => titleSet.has(t));
+  const feederMatches = [...feeders].filter((t) => titleSet.has(t));
 
   const haystack = `${designation} ${candidate.searchSnippet}`;
   const mustSkills = skillHits(haystack, brief.mustHaveSkills);
@@ -150,6 +239,17 @@ export function assessRelevance(
       tierLabel: label('Adjacent'),
       reason: `${designation.trim()}${nameNote}`,
       keep: true,
+    };
+  }
+
+  // A feeder role (Data Scientist for an Ontologist search) needs the target
+  // skills to be visible before it counts as in scope.
+  if (feederMatches.length > 0 && mustSkills.length === 0 && titleSkills.length === 0) {
+    return {
+      tier: 'excluded',
+      tierLabel: 'Removed',
+      reason: `${designation.trim()} - adjacent profession with no ${brief.mustHaveSkills.slice(0, 2).join('/')} evidence`,
+      keep: false,
     };
   }
 

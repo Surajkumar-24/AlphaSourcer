@@ -73,6 +73,9 @@ export default function CandidateResults({ session }: { session: SearchSession }
               {session.generatedQueries.length} search angles
               {' · '}
               {session.totalResultsFound} profiles reviewed
+              {session.totalUniqueBeforeFilter
+                ? ` · ${session.totalUniqueBeforeFilter - session.uniqueCandidatesFound} filtered as off-target`
+                : ''}
               {topScore > 0 ? ` · top match ${topScore}` : ''}
               {session.tokensUsed ? ` · ${session.tokensUsed.toLocaleString()} AI tokens` : ''}
             </p>

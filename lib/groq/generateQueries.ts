@@ -2,28 +2,30 @@ import { groqRequest, createSystemMessage } from './client';
 import { SearchBrief, SearchQuery } from '@/types/index';
 import { nanoid } from '@/lib/utils';
 
-const GENERATE_QUERIES_PROMPT = `Generate 6-10 diverse X-ray search queries for finding LinkedIn profiles.
+const GENERATE_QUERIES_PROMPT = `GENERATE LINKEDIN X-RAY SEARCH QUERIES.
 
-SEARCH BRIEF:
-{brief}
+JOB BRIEF: {brief}
 
-Return ONLY a JSON object with a "queries" array:
+EXAMPLE OUTPUT:
+{"queries":[{"query":"site:linkedin.com/in/ \"Ontologist\" India","family":"precision","strategyReason":"exact title"},{"query":"site:linkedin.com/in/ Ontologist taxonomy","family":"skill_led","strategyReason":"title plus skill"}]}
 
-{
-  "queries": [
-    {"query": "site:linkedin.com/in/ \\"Senior Backend Engineer\\" Python AWS", "family": "precision", "strategyReason": "Exact title plus must-have skills"},
-    {"query": "site:linkedin.com/in/ Python Django AWS microservices", "family": "skill_led", "strategyReason": "Skills as primary discovery"}
-  ]
-}
+RECALL IS THE PRIORITY. Over-constrained queries return almost nothing.
 
-RULES:
-- Every query MUST start with: site:linkedin.com/in/
-- family must be one of: precision, alternative_title, skill_led, adjacent_role, company_led, recall_expansion
-- Each query under 150 characters
-- No duplicate queries
-- Mix strict and broad searches; use OR for variations and quotes for exact phrases
-- Generate 6-10 queries, each with a distinct sourcing angle
-- Keep strategyReason under 8 words`;
+HARD RULES:
+1. Every query starts with: site:linkedin.com/in/
+2. AT MOST ONE quoted phrase per query — normally the job title. Never stack
+   several quoted phrases together; "A" "B" "C" matches virtually no profiles.
+3. AT MOST 3 terms after the site: prefix, counting the location.
+4. Include at least 2 deliberately broad queries: just the title plus location,
+   or a single alternative title plus location.
+5. Use alternative titles (same profession) freely. Use adjacent/feeder titles
+   in AT MOST ONE query — they are a different profession and mostly get
+   filtered out later.
+6. Repeat the location in most queries when the brief names one.
+7. Generate 8 queries, each a distinct angle, no duplicates.
+8. strategyReason: under 8 words.
+
+Return ONLY the JSON object.`;
 
 export async function generateQueries(brief: SearchBrief): Promise<SearchQuery[]> {
   const briefJson = JSON.stringify(brief, null, 2);

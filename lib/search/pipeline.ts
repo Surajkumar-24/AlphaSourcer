@@ -152,6 +152,7 @@ export async function processSearchPipeline(
 
     session.removedCandidates = removed;
     const deduplicatedCandidates = relevant;
+    session.totalUniqueBeforeFilter = allUnique.length;
     session.uniqueCandidatesFound = relevant.length;
 
     // Stage 6: Score Candidates
@@ -172,25 +173,36 @@ export async function processSearchPipeline(
     const scoredCandidates: Candidate[] = [];
     let evaluationFailures = 0;
 
+    // Batches run concurrently: sequential evaluation was the largest remaining
+    // block of wall-clock time, and serverless budgets time, not requests.
+    const batches: Array<Array<(typeof forReview)[number]>> = [];
     for (let i = 0; i < forReview.length; i += LIMITS.evaluationBatchSize) {
-      const batch = forReview.slice(i, i + LIMITS.evaluationBatchSize);
-      const inputs: EvaluationInput[] = batch.map(({ candidate, deterministicScore }) => ({
-        name: candidate.name,
-        designation: candidate.currentDesignation,
-        organization: candidate.currentOrganization,
-        location: candidate.location,
-        snippet: candidate.searchSnippet,
-        deterministicScore,
-      }));
+      batches.push(forReview.slice(i, i + LIMITS.evaluationBatchSize));
+    }
 
-      let evaluations;
-      try {
-        evaluations = await evaluateCandidatesBatch(searchBrief, inputs);
-      } catch (error) {
-        console.error('Batch evaluation failed:', error);
-        evaluationFailures += batch.length;
-        evaluations = null;
-      }
+    const batchResults = await Promise.all(
+      batches.map(async (batch) => {
+        const inputs: EvaluationInput[] = batch.map(({ candidate, deterministicScore }) => ({
+          name: candidate.name,
+          designation: candidate.currentDesignation,
+          organization: candidate.currentOrganization,
+          location: candidate.location,
+          snippet: candidate.searchSnippet,
+          deterministicScore,
+        }));
+
+        try {
+          return await evaluateCandidatesBatch(searchBrief, inputs);
+        } catch (error) {
+          console.error('Batch evaluation failed:', error);
+          return null;
+        }
+      })
+    );
+
+    batches.forEach((batch, batchIndex) => {
+      const evaluations = batchResults[batchIndex];
+      if (!evaluations) evaluationFailures += batch.length;
 
       batch.forEach(({ candidate, deterministicScore }, index) => {
         const evaluation = evaluations?.[index];
@@ -214,10 +226,10 @@ export async function processSearchPipeline(
           selected: false,
         });
       });
+    });
 
-      session.candidates = [...scoredCandidates].sort((a, b) => b.finalScore - a.finalScore);
-      await sessionStore.set(sessionId, session);
-    }
+    session.candidates = [...scoredCandidates].sort((a, b) => b.finalScore - a.finalScore);
+    await sessionStore.set(sessionId, session);
 
     // Anyone past the review cut still ships, ranked on deterministic signals.
     for (const { candidate, deterministicScore } of remainder) {

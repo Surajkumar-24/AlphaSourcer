@@ -62,6 +62,8 @@ export type SearchSession = {
   generatedQueries: SearchQuery[];
   totalResultsFound: number;
   uniqueCandidatesFound: number;
+  /** Pool size before the relevance gate, so filtering is transparent. */
+  totalUniqueBeforeFilter?: number;
   candidates: Candidate[];
   /** Filtered out as irrelevant; surfaced on the Removed sheet for auditability. */
   removedCandidates?: Candidate[];
