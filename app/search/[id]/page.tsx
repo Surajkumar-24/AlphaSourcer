@@ -15,28 +15,66 @@ export default function SearchPage() {
   const [error, setError] = useState('');
 
   useEffect(() => {
-    const pollSearch = async () => {
+    let cancelled = false;
+    let consecutiveFailures = 0;
+    let delay = 1500;
+
+    // A single blocked or slow poll used to end the search permanently. Tolerate
+    // a run of failures and back off, so transient hiccups are survivable.
+    const MAX_CONSECUTIVE_FAILURES = 5;
+    const MAX_DELAY = 5000;
+
+    const poll = async () => {
+      if (cancelled) return;
+
       try {
         const response = await fetch(`/api/search?sessionId=${sessionId}`);
-        if (!response.ok) {
-          throw new Error('Failed to fetch search');
-        }
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
         const data: SearchSession = await response.json();
+        if (cancelled) return;
+
+        consecutiveFailures = 0;
         setSession(data);
 
         if (data.status !== 'completed' && data.status !== 'failed') {
-          setTimeout(pollSearch, 1000);
-        } else {
-          setLoading(false);
+          delay = Math.min(delay + 250, MAX_DELAY);
+          setTimeout(poll, delay);
+          return;
         }
+
+        // Finished: pull the full record once, including the removed list the
+        // export needs but polling deliberately skips.
+        if (data.status === 'completed') {
+          try {
+            const complete = await fetch(`/api/search?sessionId=${sessionId}&full=1`);
+            if (complete.ok && !cancelled) setSession(await complete.json());
+          } catch {
+            /* the slim record is still perfectly usable */
+          }
+        }
+
+        if (!cancelled) setLoading(false);
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Error fetching search');
-        setLoading(false);
+        if (cancelled) return;
+        consecutiveFailures += 1;
+
+        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          setError(
+            'Lost connection to the search. It may still be running — refresh to check.'
+          );
+          setLoading(false);
+          return;
+        }
+
+        setTimeout(poll, Math.min(delay * 2, MAX_DELAY));
       }
     };
 
-    pollSearch();
+    poll();
+    return () => {
+      cancelled = true;
+    };
   }, [sessionId]);
 
   return (

@@ -77,6 +77,14 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Session not found' }, { status: 404 });
     }
 
+    // Polling re-fetches this every couple of seconds, and the removed list is
+    // roughly half the payload while being needed only at export time.
+    const full = request.nextUrl.searchParams.get('full') === '1';
+    if (!full && session.removedCandidates) {
+      const { removedCandidates, ...slim } = session;
+      return NextResponse.json(slim);
+    }
+
     return NextResponse.json(session);
   } catch (error) {
     console.error('Search GET error:', error);
