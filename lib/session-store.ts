@@ -96,15 +96,35 @@ export class RedisSessionStore implements SessionStore {
  * back to disk so local development needs no extra services.
  */
 export function createSessionStore(): SessionStore {
-  const url = process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  // Vercel injects different names depending on which integration created the
+  // database: Vercel KV uses KV_REST_API_*, the Upstash marketplace uses
+  // UPSTASH_REDIS_REST_*. Accept either rather than requiring a rename.
+  const url =
+    process.env.UPSTASH_REDIS_REST_URL ||
+    process.env.KV_REST_API_URL ||
+    process.env.REDIS_REST_URL;
+
+  const token =
+    process.env.UPSTASH_REDIS_REST_TOKEN ||
+    process.env.KV_REST_API_TOKEN ||
+    process.env.REDIS_REST_TOKEN;
 
   if (url && token) return new RedisSessionStore(url, token);
 
   if (process.env.VERCEL) {
+    // Name the Redis-ish variables that ARE present, so a naming mismatch is
+    // obvious instead of looking like "nothing was configured".
+    const seen = Object.keys(process.env)
+      .filter((k) => /REDIS|KV_|UPSTASH/i.test(k))
+      .sort();
+
     throw new Error(
-      'UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN must be set — ' +
-        'serverless cannot persist sessions to disk.'
+      'No Redis credentials found. Expected UPSTASH_REDIS_REST_URL + ' +
+        'UPSTASH_REDIS_REST_TOKEN (or KV_REST_API_URL + KV_REST_API_TOKEN). ' +
+        (seen.length
+          ? `Redis-related variables present: ${seen.join(', ')}. ` +
+            'If your database uses different names, map them in Project Settings.'
+          : 'No Redis-related variables are set at all — connect a database under Storage, then redeploy.')
     );
   }
 
