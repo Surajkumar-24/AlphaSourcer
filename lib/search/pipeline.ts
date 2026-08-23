@@ -27,6 +27,13 @@ export async function processSearchPipeline(
   // Single-user local tool: one search at a time, so a module-level ledger is fine.
   tokenLedger.reset();
 
+  // Serverless kills the function at maxDuration. Leave headroom so results are
+  // always written, rather than the run dying mid-scoring and stranding the
+  // session in a non-terminal state.
+  const startedAt = Date.now();
+  const AI_REVIEW_DEADLINE_MS = 40000;
+  const elapsed = () => Date.now() - startedAt;
+
   try {
     // Stage 1: Parse Requirement
     session.status = 'analyzing';
@@ -162,7 +169,14 @@ export async function processSearchPipeline(
       batches.push(forReview.slice(i, i + LIMITS.evaluationBatchSize));
     }
 
-    const batchResults = await Promise.all(
+    const budgetLeft = AI_REVIEW_DEADLINE_MS - elapsed();
+    if (budgetLeft < 5000 && batches.length > 0) {
+      console.warn(`[pipeline] ${Math.round(elapsed() / 1000)}s elapsed; skipping AI review to finish in time`);
+    }
+
+    const batchResults = budgetLeft < 5000
+      ? batches.map(() => null)
+      : await Promise.all(
       batches.map(async (batch) => {
         const inputs: EvaluationInput[] = batch.map(({ candidate, deterministicScore }) => ({
           name: candidate.name,

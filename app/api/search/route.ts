@@ -77,6 +77,18 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Session not found' }, { status: 404 });
     }
 
+    // A serverless function can be killed mid-pipeline, leaving the session in a
+    // non-terminal state that the client would poll forever. Age it out.
+    const TERMINAL = ['completed', 'failed'];
+    if (!TERMINAL.includes(session.status)) {
+      const ageMs = Date.now() - new Date(session.createdAt).getTime();
+      if (ageMs > 150000) {
+        session.status = 'failed';
+        session.error =
+          'The search stopped before finishing — it likely exceeded the server time limit. Try a narrower requirement.';
+      }
+    }
+
     // Polling re-fetches this every couple of seconds, and the removed list is
     // roughly half the payload while being needed only at export time.
     const full = request.nextUrl.searchParams.get('full') === '1';

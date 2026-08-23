@@ -64,10 +64,20 @@ export async function groqRequest<T = any>(
   const chain = getModelChain();
   let lastError: unknown = null;
 
+  // Retrying across three models could otherwise stack minutes of backoff and
+  // outlive the serverless function, which strands the whole search.
+  const callStartedAt = Date.now();
+  const totalBudgetMs = Number(process.env.GROQ_TOTAL_BUDGET_MS) || 25000;
+  const budgetLeft = () => totalBudgetMs - (Date.now() - callStartedAt);
+
   const usable = chain.filter((m) => !unusableModels.has(m.id));
   const candidates = usable.length > 0 ? usable : chain; // all dead: re-probe
 
   for (let modelIndex = 0; modelIndex < candidates.length; modelIndex++) {
+    if (budgetLeft() <= 0) {
+      console.warn('[groq] request budget exhausted; giving up on remaining models');
+      break;
+    }
     const model = candidates[modelIndex];
     const isLastModel = modelIndex === candidates.length - 1;
     const waitCeiling = isLastModel ? MAX_RETRY_WAIT_LAST_MODEL_MS : MAX_RETRY_WAIT_MS;
@@ -97,6 +107,11 @@ export async function groqRequest<T = any>(
               `[groq] ${model.id} limited for ${Math.round(waitMs / 1000)}s; ` +
                 (isLastModel ? 'no models left, giving up' : 'trying next model')
             );
+            break;
+          }
+
+          if (waitMs > budgetLeft()) {
+            console.warn(`[groq] ${model.id} needs ${Math.round(waitMs / 1000)}s but only ${Math.round(budgetLeft() / 1000)}s of budget remains`);
             break;
           }
 
