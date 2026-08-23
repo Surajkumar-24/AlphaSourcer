@@ -32,7 +32,13 @@ Return ONLY a valid JSON object (no markdown, no extra text) with this exact str
 }
 
 RULES:
-- Extract ONLY information explicitly stated
+- alternativeTitles: ALWAYS provide 3-6 real-world titles used for the SAME job
+  (e.g. for "Ontologist": Knowledge Engineer, Taxonomist, Semantic Engineer,
+  Knowledge Graph Engineer, Ontology Engineer). Never leave this empty.
+- adjacentTitles: ALWAYS provide 2-4 neighbouring roles people move in from.
+  Never leave this empty.
+- These two are inferred from domain knowledge, not copied from the text.
+- Everything else: extract ONLY information explicitly stated
 - Use null for missing values (not empty strings)
 - Keep arrays empty if no items found
 - Location normalized (e.g., "Bangalore" not "Blr")

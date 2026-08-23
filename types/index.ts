@@ -48,6 +48,10 @@ export type Candidate = {
   mismatchFlags: string[];
   reasoningSummary: string;
   selected: boolean;
+  /** Relevance gate output — drives the Shortlist/Removed split in the export. */
+  relevanceTier?: 'core' | 'adjacent' | 'skill' | 'excluded';
+  relevanceLabel?: string;
+  relevanceReason?: string;
 };
 
 export type SearchSession = {
@@ -59,6 +63,8 @@ export type SearchSession = {
   totalResultsFound: number;
   uniqueCandidatesFound: number;
   candidates: Candidate[];
+  /** Filtered out as irrelevant; surfaced on the Removed sheet for auditability. */
+  removedCandidates?: Candidate[];
   completedAt?: string;
   error?: string;
   warning?: string;

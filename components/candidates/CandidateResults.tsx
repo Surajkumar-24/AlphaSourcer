@@ -82,6 +82,7 @@ export default function CandidateResults({ session }: { session: SearchSession }
             <ExportButton
               candidates={selectedCandidatesList}
               roleName={session.searchBrief?.primaryTitle || 'Candidates'}
+              removed={session.removedCandidates ?? []}
             />
           </div>
         </div>

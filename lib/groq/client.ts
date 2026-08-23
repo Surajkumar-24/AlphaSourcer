@@ -12,9 +12,11 @@ export const tokenLedger = {
 };
 
 const MAX_ATTEMPTS_PER_MODEL = 3;
-// A per-minute limit clears in seconds. A daily-quota 429 reports a Retry-After
-// of many minutes — switch models instead of blocking the search on it.
-const MAX_RETRY_WAIT_MS = 20000;
+// Switching models is cheaper than waiting, so while alternatives remain we
+// only absorb short waits. On the last model there is nothing to fall through
+// to, so a per-minute limit is worth waiting out rather than failing the batch.
+const MAX_RETRY_WAIT_MS = Number(process.env.GROQ_MAX_RETRY_WAIT_MS) || 20000;
+const MAX_RETRY_WAIT_LAST_MODEL_MS = Number(process.env.GROQ_MAX_RETRY_WAIT_LAST_MS) || 45000;
 
 type GroqError = Error & { status?: number; retryAfterMs?: number };
 
@@ -65,7 +67,11 @@ export async function groqRequest<T = any>(
   const usable = chain.filter((m) => !unusableModels.has(m.id));
   const candidates = usable.length > 0 ? usable : chain; // all dead: re-probe
 
-  for (const model of candidates) {
+  for (let modelIndex = 0; modelIndex < candidates.length; modelIndex++) {
+    const model = candidates[modelIndex];
+    const isLastModel = modelIndex === candidates.length - 1;
+    const waitCeiling = isLastModel ? MAX_RETRY_WAIT_LAST_MODEL_MS : MAX_RETRY_WAIT_MS;
+
     for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_MODEL; attempt++) {
       try {
         const result = await groqRequestOnce<T>(model, messages, options);
@@ -86,9 +92,10 @@ export async function groqRequest<T = any>(
         if (info.status === 429) {
           const waitMs = info.retryAfterMs ?? Math.min(2000 * 2 ** (attempt - 1), 15000);
 
-          if (waitMs > MAX_RETRY_WAIT_MS) {
+          if (waitMs > waitCeiling) {
             console.warn(
-              `[groq] ${model.id} quota exhausted (retry in ${Math.round(waitMs / 1000)}s); trying next model`
+              `[groq] ${model.id} limited for ${Math.round(waitMs / 1000)}s; ` +
+                (isLastModel ? 'no models left, giving up' : 'trying next model')
             );
             break;
           }

@@ -1,79 +1,128 @@
 import { Candidate } from '@/types/index';
 import * as ExcelJS from 'exceljs';
 
-export async function generateExcelFile(
+const NAVY = 'FF0B1F3A';
+const TEAL = 'FF00B4A6';
+const BAND = 'FFF6F6FB';
+
+type Column = { header: string; key: string; width: number };
+
+const SHORTLIST_COLUMNS: Column[] = [
+  { header: 'Candidate Name', key: 'name', width: 26 },
+  { header: 'Current Designation', key: 'designation', width: 38 },
+  { header: 'Current Organization', key: 'organization', width: 30 },
+  { header: 'LinkedIn Profile URL', key: 'url', width: 46 },
+  { header: 'Relevance Tier', key: 'tier', width: 22 },
+  { header: 'Why kept', key: 'why', width: 44 },
+];
+
+const REMOVED_COLUMNS: Column[] = [
+  ...SHORTLIST_COLUMNS.slice(0, 4),
+  { header: 'Why removed', key: 'why', width: 52 },
+];
+
+function styleHeader(sheet: ExcelJS.Worksheet, columnCount: number): void {
+  const header = sheet.getRow(1);
+  header.height = 22;
+  header.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
+  header.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: NAVY } };
+  header.alignment = { vertical: 'middle', horizontal: 'left' };
+
+  // Freeze the header and add filter dropdowns so long lists stay navigable.
+  sheet.views = [{ state: 'frozen', ySplit: 1 }];
+  sheet.autoFilter = {
+    from: { row: 1, column: 1 },
+    to: { row: 1, column: columnCount },
+  };
+}
+
+function writeRows(
+  sheet: ExcelJS.Worksheet,
   candidates: Candidate[],
-  roleName: string
-): Promise<Buffer> {
-  const workbook = new ExcelJS.Workbook();
-  const worksheet = workbook.addWorksheet('Candidates');
-
-  // Define columns
-  worksheet.columns = [
-    { header: 'Sr. No.', key: 'srNo', width: 8 },
-    { header: 'Candidate Name', key: 'name', width: 25 },
-    { header: 'Current Designation', key: 'designation', width: 35 },
-    { header: 'Current Organization', key: 'organization', width: 25 },
-    { header: 'LinkedIn Profile URL', key: 'url', width: 40 },
-  ];
-
-  // Add data rows
+  includeTier: boolean
+): void {
   candidates.forEach((candidate, index) => {
     const url = candidate.linkedinUrl?.trim();
-    worksheet.addRow({
-      srNo: index + 1,
-      name: candidate.name,
+
+    const row = sheet.addRow({
+      name: candidate.name || 'Unknown',
       designation: candidate.currentDesignation || '-',
       organization: candidate.currentOrganization || '-',
-      // A hyperlink value keeps the URL readable and clickable; `cell.hyperlink` is read-only
+      // A hyperlink value keeps the URL readable and clickable.
       url: url ? { text: url, hyperlink: url, tooltip: 'Open LinkedIn profile' } : '-',
+      ...(includeTier ? { tier: candidate.relevanceLabel || '-' } : {}),
+      why: candidate.relevanceReason || '-',
     });
-  });
 
-  // Style header row
-  const headerRow = worksheet.getRow(1);
-  headerRow.font = { bold: true, color: { argb: 'FF0B1F3A' } };
-  headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF6F6FB' } };
-  headerRow.alignment = { horizontal: 'center', vertical: 'middle' };
+    row.alignment = { vertical: 'top', wrapText: false };
 
-  // Style URL cells that are actual links
-  worksheet.eachRow((row, rowNumber) => {
-    if (rowNumber > 1) {
-      const urlCell = row.getCell('url');
-      if (urlCell.type === ExcelJS.ValueType.Hyperlink) {
-        urlCell.font = { color: { argb: 'FF00B4A6' }, underline: 'single' };
-      }
+    // Banding makes wide rows easier to track across columns.
+    if (index % 2 === 1) {
+      row.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BAND } };
+    }
+
+    const urlCell = row.getCell('url');
+    if (urlCell.type === ExcelJS.ValueType.Hyperlink) {
+      urlCell.font = { color: { argb: TEAL }, underline: 'single' };
     }
   });
+}
 
-  // Add summary sheet
-  const summarySheet = workbook.addWorksheet('Summary');
-  summarySheet.columns = [
-    { header: 'Metric', key: 'metric', width: 25 },
-    { header: 'Value', key: 'value', width: 25 },
+export async function generateExcelFile(
+  candidates: Candidate[],
+  roleName: string,
+  removed: Candidate[] = []
+): Promise<Buffer> {
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = 'AlphaSourcer';
+  workbook.created = new Date();
+
+  // --- Shortlist ---
+  const shortlist = workbook.addWorksheet('Shortlist');
+  shortlist.columns = SHORTLIST_COLUMNS;
+  writeRows(shortlist, candidates, true);
+  styleHeader(shortlist, SHORTLIST_COLUMNS.length);
+
+  // --- Removed ---
+  const removedSheet = workbook.addWorksheet('Removed');
+  removedSheet.columns = REMOVED_COLUMNS;
+  writeRows(removedSheet, removed, false);
+  styleHeader(removedSheet, REMOVED_COLUMNS.length);
+
+  // --- Summary ---
+  const summary = workbook.addWorksheet('Summary');
+  summary.columns = [
+    { header: 'Metric', key: 'metric', width: 32 },
+    { header: 'Value', key: 'value', width: 34 },
   ];
 
-  const totalCandidates = candidates.length;
-  const excellentMatches = candidates.filter((c) => c.matchStrength === 'excellent').length;
-  const strongMatches = candidates.filter((c) => c.matchStrength === 'strong').length;
-  const potentialMatches = candidates.filter((c) => c.matchStrength === 'potential').length;
+  const countTier = (tier: string) => candidates.filter((c) => c.relevanceTier === tier).length;
+  const countStrength = (s: string) => candidates.filter((c) => c.matchStrength === s).length;
 
-  summarySheet.addRows([
-    { metric: 'Search Date', value: new Date().toLocaleDateString() },
-    { metric: 'Role Searched', value: roleName },
-    { metric: 'Total Candidates', value: totalCandidates },
-    { metric: 'Excellent Matches', value: excellentMatches },
-    { metric: 'Strong Matches', value: strongMatches },
-    { metric: 'Potential Matches', value: potentialMatches },
+  summary.addRows([
+    { metric: 'Role searched', value: roleName },
+    { metric: 'Search date', value: new Date().toLocaleDateString() },
+    { metric: '', value: '' },
+    { metric: 'Shortlisted candidates', value: candidates.length },
+    { metric: 'Removed as irrelevant', value: removed.length },
+    { metric: '', value: '' },
+    { metric: 'Core matches', value: countTier('core') },
+    { metric: 'Adjacent matches', value: countTier('adjacent') },
+    { metric: 'Skill-based matches', value: countTier('skill') },
+    { metric: '', value: '' },
+    { metric: 'Excellent (90+)', value: countStrength('excellent') },
+    { metric: 'Strong (75-89)', value: countStrength('strong') },
+    { metric: 'Potential (60-74)', value: countStrength('potential') },
+    { metric: 'Low (<60)', value: countStrength('low') },
   ]);
 
-  // Style summary
-  const summaryHeaderRow = summarySheet.getRow(1);
-  summaryHeaderRow.font = { bold: true, color: { argb: 'FF0B1F3A' } };
-  summaryHeaderRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF6F6FB' } };
+  styleHeader(summary, 2);
+  summary.autoFilter = undefined as never; // a filter makes no sense on a summary
+  summary.getColumn('metric').font = { bold: false };
+  summary.getRow(4).font = { bold: true };
+  summary.getRow(5).font = { bold: true };
 
-  // Return buffer
-  return await workbook.xlsx.writeBuffer() as any;
+  return (await workbook.xlsx.writeBuffer()) as unknown as Buffer;
 }
 
 export function getExcelFileName(roleName: string): string {

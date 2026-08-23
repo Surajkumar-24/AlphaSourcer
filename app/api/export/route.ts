@@ -5,7 +5,7 @@ import { generateExcelFile, getExcelFileName } from '@/lib/export/excel';
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { candidates, roleName } = body;
+    const { candidates, roleName, removed } = body;
 
     if (!Array.isArray(candidates)) {
       return NextResponse.json({ error: 'Invalid candidates array' }, { status: 400 });
@@ -15,7 +15,11 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Invalid roleName' }, { status: 400 });
     }
 
-    const excelBuffer = await generateExcelFile(candidates, roleName);
+    const excelBuffer = await generateExcelFile(
+      candidates,
+      roleName,
+      Array.isArray(removed) ? removed : []
+    );
     const fileName = getExcelFileName(roleName);
 
     return new NextResponse(Buffer.from(excelBuffer), {

@@ -6,6 +6,7 @@ import { parseSearchResult } from '@/lib/candidates/parseSearchResult';
 import { evaluateCandidatesBatch, EvaluationInput } from '@/lib/groq/evaluateCandidate';
 import { calculateDeterministicScore } from '@/lib/scoring/deterministic';
 import { deduplicateCandidates } from '@/lib/candidates/deduplicate';
+import { assessRelevance } from '@/lib/candidates/relevance';
 import { LIMITS } from '@/config/limits';
 import { MATCH_STRENGTH_RANGES, FINAL_SCORE_WEIGHTS } from '@/config/scoring';
 import { nanoid } from '@/lib/utils';
@@ -105,8 +106,53 @@ export async function processSearchPipeline(
     }
 
     // Stage 5: Deduplicate
-    const deduplicatedCandidates = deduplicateCandidates(rawCandidates);
-    session.uniqueCandidatesFound = deduplicatedCandidates.length;
+    const allUnique = deduplicateCandidates(rawCandidates);
+
+    // Stage 5b: Relevance gate. Deterministic, so it costs nothing and applies
+    // to every candidate rather than only the slice the LLM reviews.
+    const relevant: Candidate[] = [];
+    const removed: Candidate[] = [];
+
+    for (const candidate of allUnique) {
+      const verdict = assessRelevance(candidate, searchBrief);
+      const tagged: Candidate = {
+        ...candidate,
+        relevanceTier: verdict.tier,
+        relevanceLabel: verdict.tierLabel,
+        relevanceReason: verdict.reason,
+      };
+      (verdict.keep ? relevant : removed).push(tagged);
+    }
+
+    // If the gate would discard most of the pool it is probably mis-calibrated
+    // for this role (an unusual title, or a brief with no alternatives), so
+    // re-admit everything except the candidates with no signal whatsoever.
+    const removalRatio = allUnique.length > 0 ? removed.length / allUnique.length : 0;
+    let gateRelaxed = false;
+
+    if (removalRatio > 0.65 && allUnique.length >= 20) {
+      const hardFail = (c: Candidate) =>
+        (c.relevanceReason || '').includes('no overlap with target title');
+      const reAdmitted = removed.filter((c) => !hardFail(c));
+
+      if (reAdmitted.length > 0) {
+        gateRelaxed = true;
+        for (const c of reAdmitted) {
+          relevant.push({ ...c, relevanceTier: 'skill', relevanceLabel: `Broad match - ${searchBrief.primaryTitle || 'Role'}` });
+        }
+        removed.splice(0, removed.length, ...removed.filter(hardFail));
+      }
+    }
+
+    if (gateRelaxed) {
+      console.warn(
+        `[relevance] gate would have removed ${Math.round(removalRatio * 100)}%; relaxed to avoid over-filtering`
+      );
+    }
+
+    session.removedCandidates = removed;
+    const deduplicatedCandidates = relevant;
+    session.uniqueCandidatesFound = relevant.length;
 
     // Stage 6: Score Candidates
     session.status = 'scoring';
@@ -195,8 +241,13 @@ export async function processSearchPipeline(
         `the AI review step hit its rate limit. Ranking is still valid, just less nuanced.`;
     }
 
-    // Sort by final score
-    scoredCandidates.sort((a, b) => b.finalScore - a.finalScore);
+    // Tier first, then score: a Core title match outranks an Adjacent one even
+    // when keyword-based scoring happens to favour the latter.
+    const TIER_RANK: Record<string, number> = { core: 0, adjacent: 1, skill: 2, excluded: 3 };
+    scoredCandidates.sort((a, b) => {
+      const tier = (TIER_RANK[a.relevanceTier ?? 'skill'] ?? 3) - (TIER_RANK[b.relevanceTier ?? 'skill'] ?? 3);
+      return tier !== 0 ? tier : b.finalScore - a.finalScore;
+    });
 
     session.candidates = scoredCandidates;
     session.tokensUsed = tokenLedger.total;

@@ -6,9 +6,10 @@ import { Candidate } from '@/types/index';
 interface ExportButtonProps {
   candidates: Candidate[];
   roleName: string;
+  removed?: Candidate[];
 }
 
-export default function ExportButton({ candidates, roleName }: ExportButtonProps) {
+export default function ExportButton({ candidates, roleName, removed = [] }: ExportButtonProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -25,7 +26,7 @@ export default function ExportButton({ candidates, roleName }: ExportButtonProps
       const response = await fetch('/api/export', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ candidates, roleName }),
+        body: JSON.stringify({ candidates, roleName, removed }),
       });
 
       if (!response.ok) {
