@@ -52,29 +52,51 @@ export function tokenize(text: string): Set<string> {
 }
 
 /**
- * Alternative titles name the SAME job ("Ontologist" ~ "Taxonomist") and stand
- * on their own. Adjacent titles are neighbouring roles people move in from
- * ("Data Scientist"), which are only in scope with corroborating skills —
- * treating the two alike floods the shortlist with the wrong profession.
+ * Each accepted title is kept as its own token set. Matching requires EVERY
+ * token of some title to be present — flattening them into one pool let a
+ * single shared word like "engineer" admit an unrelated profession.
  */
-function titleTokens(brief: SearchBrief): {
+function titleMatchers(brief: SearchBrief): {
   core: Set<string>;
-  alternates: Set<string>;
-  feeders: Set<string>;
+  alternates: Array<{ label: string; tokens: Set<string> }>;
 } {
   const core = tokenize(brief.primaryTitle || '');
-  const alternates = new Set<string>();
-  const feeders = new Set<string>();
+  const alternates = brief.alternativeTitles
+    .map((label) => ({ label, tokens: tokenize(label) }))
+    .filter((t) => t.tokens.size > 0);
+  return { core, alternates };
+}
 
-  for (const title of brief.alternativeTitles) {
-    tokenize(title).forEach((t) => alternates.add(t));
+/**
+ * Same word, different ending: ontology/ontologist, taxonomy/taxonomist. A
+ * shared prefix of six or more characters is specific enough to be safe —
+ * "data" and "database" share only four and stay distinct.
+ */
+const MIN_STEM = 6;
+
+function sameStem(a: string, b: string): boolean {
+  if (a === b) return true;
+  const shorter = a.length <= b.length ? a : b;
+  const longer = a.length <= b.length ? b : a;
+  if (shorter.length < MIN_STEM) return false;
+  return longer.startsWith(shorter.slice(0, MIN_STEM)) && shorter.startsWith(shorter.slice(0, MIN_STEM));
+}
+
+function hasToken(titleSet: Set<string>, token: string): boolean {
+  if (titleSet.has(token)) return true;
+  for (const candidate of titleSet) {
+    if (sameStem(candidate, token)) return true;
   }
-  for (const title of brief.adjacentTitles) {
-    tokenize(title).forEach((t) => {
-      if (!alternates.has(t)) feeders.add(t);
-    });
+  return false;
+}
+
+/** True when every distinctive word of `required` appears in `titleSet`. */
+function containsAllTokens(titleSet: Set<string>, required: Set<string>): boolean {
+  if (required.size === 0) return false;
+  for (const token of required) {
+    if (!hasToken(titleSet, token)) return false;
   }
-  return { core, alternates, feeders };
+  return true;
 }
 
 // Cities that imply their country, so "Bangalore" in a brief still accepts a
@@ -96,17 +118,32 @@ const CITY_ALIASES: Record<string, string[]> = {
   gurgaon: ['gurugram'], gurugram: ['gurgaon'],
 };
 
-/** Location terms the brief will accept, expanded with implied countries and aliases. */
-function acceptedLocations(brief: SearchBrief): Set<string> {
-  const accepted = new Set<string>();
+/**
+ * Accepted location terms, and whether the brief is city-specific. Naming a
+ * city means that city — a brief for Bangalore should not return Chennai.
+ */
+function acceptedLocations(brief: SearchBrief): { terms: Set<string>; cityLevel: boolean } {
+  const terms = new Set<string>();
+  let cityLevel = false;
+
   for (const raw of [...brief.locations, ...brief.locationVariants]) {
     const loc = normalize(raw);
     if (!loc) continue;
-    accepted.add(loc);
-    if (CITY_COUNTRY[loc]) accepted.add(CITY_COUNTRY[loc]);
-    for (const alias of CITY_ALIASES[loc] ?? []) accepted.add(alias);
+    terms.add(loc);
+
+    if (CITY_COUNTRY[loc]) {
+      // A recognised city: demand the city itself, plus its known aliases.
+      cityLevel = true;
+      for (const alias of CITY_ALIASES[loc] ?? []) terms.add(alias);
+    } else {
+      // Treat as a region/country: also accept cities known to sit inside it.
+      for (const [city, country] of Object.entries(CITY_COUNTRY)) {
+        if (country === loc) terms.add(city);
+      }
+    }
   }
-  return accepted;
+
+  return { terms, cityLevel };
 }
 
 /**
@@ -117,21 +154,22 @@ export function locationMismatch(
   candidateLocation: string | null | undefined,
   brief: SearchBrief
 ): boolean {
-  const accepted = acceptedLocations(brief);
-  if (accepted.size === 0) return false;
+  const { terms, cityLevel } = acceptedLocations(brief);
+  if (terms.size === 0) return false;
 
   const loc = normalize(candidateLocation || '');
   if (!loc) return false;
 
-  for (const term of accepted) {
+  for (const term of terms) {
     if (loc.includes(term)) return false;
   }
 
-  // No direct hit. Fall back to the city the profile names, in case the brief
-  // targets a country and the profile only lists a city.
-  for (const part of loc.split(' ')) {
-    const country = CITY_COUNTRY[part];
-    if (country && accepted.has(country)) return false;
+  // Country-level briefs still accept a profile that names only its city.
+  if (!cityLevel) {
+    for (const part of loc.split(' ')) {
+      const country = CITY_COUNTRY[part];
+      if (country && terms.has(country)) return false;
+    }
   }
 
   return true;
@@ -171,7 +209,7 @@ export function assessRelevance(
   const candidateLocation = candidate.location || null;
   const roleName = brief.primaryTitle || 'Role';
   const designation = candidate.currentDesignation || '';
-  const { core, alternates, feeders } = titleTokens(brief);
+  const { core, alternates } = titleMatchers(brief);
 
   const label = (tier: string) => `${tier} - ${roleName}`;
 
@@ -185,44 +223,21 @@ export function assessRelevance(
     };
   }
 
-  // A designation is required; without one there is nothing to judge against.
+  // Title-driven by design: without a designation there is no title to match.
   if (!designation.trim()) {
-    const skills = skillHits(candidate.searchSnippet, brief.mustHaveSkills);
-    if (skills.length >= 2) {
-      return {
-        tier: 'skill',
-        tierLabel: label('Skill match'),
-        reason: `No title listed; profile shows ${skills.slice(0, 3).join(', ')}`,
-        keep: true,
-      };
-    }
     return {
       tier: 'excluded',
       tierLabel: 'Removed',
-      reason: 'No designation found and no matching skills',
+      reason: 'No job title found in the profile',
       keep: false,
     };
   }
 
   const titleSet = tokenize(designation);
-  const coreMatches = [...core].filter((t) => titleSet.has(t));
-  const altMatches = [...alternates].filter((t) => titleSet.has(t));
-  const feederMatches = [...feeders].filter((t) => titleSet.has(t));
-
-  const haystack = `${designation} ${candidate.searchSnippet}`;
-  const mustSkills = skillHits(haystack, brief.mustHaveSkills);
-  const niceSkills = skillHits(haystack, brief.goodToHaveSkills);
-  // A required skill in the job title itself is far stronger evidence than one
-  // mentioned in passing in the profile blurb.
-  const titleSkills = skillHits(designation, [
-    ...brief.mustHaveSkills,
-    ...brief.goodToHaveSkills,
-  ]);
-
   const nameNote = candidate.name === 'Unknown' ? ' - candidate name missing in source' : '';
 
-  // Every distinctive word of the target title is present.
-  if (core.size > 0 && coreMatches.length === core.size) {
+  // Exact target title: every distinctive word of it appears in the job title.
+  if (containsAllTokens(titleSet, core)) {
     return {
       tier: 'core',
       tierLabel: label('Core'),
@@ -231,56 +246,22 @@ export function assessRelevance(
     };
   }
 
-  // Most of the title matches, or it matches a stated alternative/adjacent role.
-  const strongPartial = core.size > 1 && coreMatches.length >= core.size - 1;
-  if (strongPartial || altMatches.length > 0) {
+  // A recognised synonym for the same profession, matched in full.
+  const matchedAlternate = alternates.find((alt) => containsAllTokens(titleSet, alt.tokens));
+  if (matchedAlternate) {
     return {
       tier: 'adjacent',
-      tierLabel: label('Adjacent'),
-      reason: `${designation.trim()}${nameNote}`,
+      tierLabel: label('Close match'),
+      reason: `${designation.trim()} - equivalent to ${matchedAlternate.label}${nameNote}`,
       keep: true,
     };
   }
 
-  // A feeder role (Data Scientist for an Ontologist search) needs the target
-  // skills to be visible before it counts as in scope.
-  if (feederMatches.length > 0 && mustSkills.length === 0 && titleSkills.length === 0) {
-    return {
-      tier: 'excluded',
-      tierLabel: 'Removed',
-      reason: `${designation.trim()} - adjacent profession with no ${brief.mustHaveSkills.slice(0, 2).join('/')} evidence`,
-      keep: false,
-    };
-  }
-
-  // Title diverges, but the required skills are demonstrably present.
-  if (titleSkills.length > 0 || mustSkills.length >= 2 || (mustSkills.length === 1 && coreMatches.length > 0)) {
-    return {
-      tier: 'skill',
-      tierLabel: label('Skill match'),
-      reason: `${designation.trim()} - matches ${(titleSkills.length ? titleSkills : mustSkills).slice(0, 3).join(', ')}${nameNote}`,
-      keep: true,
-    };
-  }
-
-  // Nothing lines up: no title overlap, no required skills.
-  if (coreMatches.length === 0 && mustSkills.length === 0) {
-    const detail = niceSkills.length
-      ? `only peripheral skills (${niceSkills.slice(0, 2).join(', ')})`
-      : 'no overlap with target title or required skills';
-    return {
-      tier: 'excluded',
-      tierLabel: 'Removed',
-      reason: `${designation.trim()} - ${detail}`,
-      keep: false,
-    };
-  }
-
-  // A single generic word in common ("engineer") is too weak on its own.
+  // Anything else is a different job, however strong the profile may be.
   return {
     tier: 'excluded',
     tierLabel: 'Removed',
-    reason: `${designation.trim()} - only a generic title overlap, no required skills`,
+    reason: `${designation.trim()} - not ${roleName} or a recognised equivalent`,
     keep: false,
   };
 }

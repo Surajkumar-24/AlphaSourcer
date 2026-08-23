@@ -1,6 +1,6 @@
 import { SearchSession, Candidate, SearchBrief } from '@/types/index';
 import { parseRequirement } from '@/lib/groq/parseRequirement';
-import { generateQueries } from '@/lib/groq/generateQueries';
+import { buildQueries } from '@/lib/search/buildQueries';
 import { serperSearchPaged, isLinkedInProfileUrl } from '@/lib/serper/search';
 import { parseSearchResult } from '@/lib/candidates/parseSearchResult';
 import { evaluateCandidatesBatch, EvaluationInput } from '@/lib/groq/evaluateCandidate';
@@ -37,8 +37,13 @@ export async function processSearchPipeline(
     session.status = 'generating_queries';
     await sessionStore.set(sessionId, session);
 
-    // Stage 2: Generate Queries
-    const queries = await generateQueries(searchBrief);
+    // Stage 2: Generate Queries — deterministic, so every query provably
+    // carries an accepted title and the requested location, and it costs no
+    // tokens (which also removes a rate-limit failure point).
+    const queries = buildQueries(searchBrief);
+    if (queries.length === 0) {
+      throw new Error('Could not build any search queries from this requirement');
+    }
     session.generatedQueries = queries;
     session.status = 'searching';
     await sessionStore.set(sessionId, session);
@@ -124,32 +129,9 @@ export async function processSearchPipeline(
       (verdict.keep ? relevant : removed).push(tagged);
     }
 
-    // If the gate would discard most of the pool it is probably mis-calibrated
-    // for this role (an unusual title, or a brief with no alternatives), so
-    // re-admit everything except the candidates with no signal whatsoever.
-    const removalRatio = allUnique.length > 0 ? removed.length / allUnique.length : 0;
-    let gateRelaxed = false;
-
-    if (removalRatio > 0.65 && allUnique.length >= 20) {
-      const hardFail = (c: Candidate) =>
-        (c.relevanceReason || '').includes('no overlap with target title');
-      const reAdmitted = removed.filter((c) => !hardFail(c));
-
-      if (reAdmitted.length > 0) {
-        gateRelaxed = true;
-        for (const c of reAdmitted) {
-          relevant.push({ ...c, relevanceTier: 'skill', relevanceLabel: `Broad match - ${searchBrief.primaryTitle || 'Role'}` });
-        }
-        removed.splice(0, removed.length, ...removed.filter(hardFail));
-      }
-    }
-
-    if (gateRelaxed) {
-      console.warn(
-        `[relevance] gate would have removed ${Math.round(removalRatio * 100)}%; relaxed to avoid over-filtering`
-      );
-    }
-
+    // No safety valve here by design: the gate is intentionally strict, so a
+    // high removal rate means the search returned the wrong people, not that
+    // the filter is mis-calibrated. Re-admitting them would defeat the point.
     session.removedCandidates = removed;
     const deduplicatedCandidates = relevant;
     session.totalUniqueBeforeFilter = allUnique.length;
