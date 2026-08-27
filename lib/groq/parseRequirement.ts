@@ -21,6 +21,7 @@ Return ONLY a valid JSON object (no markdown, no extra text) with this exact str
   "locations": [],
   "locationVariants": [],
   "preferredCompanies": [],
+  "inferredCompanies": [],
   "excludedCompanies": [],
   "preferredIndustries": [],
   "excludedIndustries": [],
@@ -32,6 +33,12 @@ Return ONLY a valid JSON object (no markdown, no extra text) with this exact str
 }
 
 RULES:
+- inferredCompanies: whenever an INDUSTRY or DOMAIN is named, list 8-12 real,
+  currently-operating companies in it, respecting any stated location (Indian
+  HRTech firms for an India-based HRTech brief). Do this EVEN IF the requirement
+  already names companies — phrases like "or any such companies" invite more.
+  Do NOT repeat companies already listed in preferredCompanies. Leave EMPTY only
+  when no industry or domain is stated. Real companies only — never invent.
 - alternativeTitles: ALWAYS provide 3-6 real-world titles used for the SAME job
   (e.g. for "Ontologist": Knowledge Engineer, Taxonomist, Semantic Engineer,
   Knowledge Graph Engineer, Ontology Engineer). Never leave this empty.

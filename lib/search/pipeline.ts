@@ -61,7 +61,12 @@ export async function processSearchPipeline(
     const searches = await Promise.allSettled(
       queries.map(async (query) => ({
         query,
-        results: await serperSearchPaged(query.query, LIMITS.resultPagesPerQuery),
+        // Deep paging pays off on a handful of broad queries; across many
+        // narrow company queries it mostly buys empty pages.
+        results: await serperSearchPaged(
+          query.query,
+          queries.length > 10 ? 3 : LIMITS.resultPagesPerQuery
+        ),
       }))
     );
 

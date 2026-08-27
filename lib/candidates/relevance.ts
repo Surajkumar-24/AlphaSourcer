@@ -289,15 +289,21 @@ export function assessRelevance(
 
   // Employer / sector evidence. When a brief names companies or an industry,
   // a matching job title at an unrelated employer is not what was asked for.
-  const wantsCompany = brief.preferredCompanies.length > 0;
+  const wantsCompany =
+    brief.preferredCompanies.length > 0 || (brief.inferredCompanies ?? []).length > 0;
   const wantsIndustry = brief.preferredIndustries.length > 0;
 
   let employerNote = '';
+  let employerUnverified = false;
+
   if (wantsCompany || wantsIndustry) {
     const org = normalize(candidate.currentOrganization || '');
     const context = `${org} ${normalize(candidate.searchSnippet)}`;
 
-    const namedCompany = brief.preferredCompanies.find((c) => {
+    const namedCompany = [
+      ...brief.preferredCompanies,
+      ...(brief.inferredCompanies ?? []),
+    ].find((c) => {
       const n = normalize(c);
       return n.length > 2 && context.includes(n);
     });
@@ -310,11 +316,17 @@ export function assessRelevance(
       employerNote = ` at ${namedCompany}`;
     } else if (sectorTerm) {
       employerNote = ` - ${brief.preferredIndustries[0]} background`;
+    } else if (!candidate.currentOrganization) {
+      // The employer is absent from the search result, not proven different.
+      // Dropping these treats missing information as a mismatch and was
+      // discarding roughly half of an otherwise valid shortlist.
+      employerUnverified = true;
+      employerNote = ' - employer not listed in the profile';
     } else {
       return {
         tier: 'excluded',
         tierLabel: 'Removed',
-        reason: `${designation.trim()}${candidate.currentOrganization ? ` at ${candidate.currentOrganization}` : ''} - not from ${
+        reason: `${designation.trim()} at ${candidate.currentOrganization} - not from ${
           wantsCompany ? 'a target company' : brief.preferredIndustries.join('/')
         }`,
         keep: false,
@@ -335,6 +347,14 @@ export function assessRelevance(
   // A recognised synonym for the same profession, matched in full.
   const matchedAlternate = alternates.find((alt) => containsAllTokens(titleSet, alt.tokens));
   if (matchedAlternate) {
+    if (employerUnverified) {
+      return {
+        tier: 'skill',
+        tierLabel: `Unconfirmed employer - ${roleName}`,
+        reason: `${designation.trim()}${employerNote} - equivalent to ${matchedAlternate.label}${nameNote}`,
+        keep: true,
+      };
+    }
     return {
       tier: 'adjacent',
       tierLabel: label('Close match'),

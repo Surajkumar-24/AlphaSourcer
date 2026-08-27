@@ -11,6 +11,8 @@ export type SearchBrief = {
   locations: string[];
   locationVariants: string[];
   preferredCompanies: string[];
+  /** Employers the model derived from a named industry when none were listed. */
+  inferredCompanies: string[];
   excludedCompanies: string[];
   preferredIndustries: string[];
   excludedIndustries: string[];
