@@ -22,6 +22,9 @@ Return ONLY a valid JSON object (no markdown, no extra text) with this exact str
   "locationVariants": [],
   "preferredCompanies": [],
   "inferredCompanies": [],
+  "educationQualifications": [],
+  "studentStatus": null,
+  "inferredInstitutions": [],
   "excludedCompanies": [],
   "preferredIndustries": [],
   "excludedIndustries": [],
@@ -33,6 +36,17 @@ Return ONLY a valid JSON object (no markdown, no extra text) with this exact str
 }
 
 RULES:
+- educationQualifications: degrees or qualifications named in the requirement
+  (BBA, BMS, MBA, PGDM, B.Tech, MSW...). Empty if none are mentioned.
+- studentStatus: "pursuing" when the requirement asks for current students or
+  people still studying ("pursuing", "final year", "undergraduate"); "graduate"
+  when it asks for people who have completed a degree; otherwise null.
+- inferredInstitutions: when studentStatus is "pursuing" AND a region is given,
+  name 8-12 real, well-regarded colleges in that region offering those degrees
+  (for BBA/BMS/MBA in Maharashtra: Jamnalal Bajaj, SIBM Pune, NMIMS, Symbiosis,
+  Welingkar, K J Somaiya...). Empty otherwise. Real institutions only.
+- inferredCompanies: leave EMPTY when studentStatus is "pursuing" — students are
+  found through their college, not through employers.
 - inferredCompanies: whenever an INDUSTRY or DOMAIN is named, list 8-12 real,
   currently-operating companies in it, respecting any stated location (Indian
   HRTech firms for an India-based HRTech brief). Do this EVEN IF the requirement

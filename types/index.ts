@@ -13,6 +13,12 @@ export type SearchBrief = {
   preferredCompanies: string[];
   /** Employers the model derived from a named industry when none were listed. */
   inferredCompanies: string[];
+  /** Degrees or qualifications, e.g. BBA, BMS, MBA. */
+  educationQualifications: string[];
+  /** "pursuing" targets current students; "graduate" targets those who finished. */
+  studentStatus: 'pursuing' | 'graduate' | null;
+  /** Colleges derived from the qualification and region, for campus sourcing. */
+  inferredInstitutions: string[];
   excludedCompanies: string[];
   preferredIndustries: string[];
   excludedIndustries: string[];
@@ -26,7 +32,14 @@ export type SearchBrief = {
 export type SearchQuery = {
   id: string;
   query: string;
-  family: 'precision' | 'alternative_title' | 'skill_led' | 'adjacent_role' | 'company_led' | 'recall_expansion';
+  family:
+    | 'precision'
+    | 'alternative_title'
+    | 'skill_led'
+    | 'adjacent_role'
+    | 'company_led'
+    | 'education_led'
+    | 'recall_expansion';
   strategyReason: string;
 };
 

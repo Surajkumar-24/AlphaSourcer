@@ -55,18 +55,22 @@ export async function processSearchPipeline(
     session.status = 'searching';
     await sessionStore.set(sessionId, session);
 
+    // Roughly 40 credits per search, whatever mix of queries the brief produces.
+    const pagesPerQuery =
+      queries.length > 12 ? 2 : queries.length > 8 ? 3 : LIMITS.resultPagesPerQuery;
+    console.log(
+      `[search] ${queries.length} queries x ${pagesPerQuery} pages = ~${queries.length * pagesPerQuery} credits`
+    );
+
     // Stage 3: Search with Serper
     // Queries run concurrently — 8 sequential paged fetches dominated total
     // runtime and would blow past a serverless function's duration limit.
     const searches = await Promise.allSettled(
       queries.map(async (query) => ({
         query,
-        // Deep paging pays off on a handful of broad queries; across many
-        // narrow company queries it mostly buys empty pages.
-        results: await serperSearchPaged(
-          query.query,
-          queries.length > 10 ? 3 : LIMITS.resultPagesPerQuery
-        ),
+        // Each page is a Serper credit, so depth is traded against breadth:
+        // a few broad queries earn deep paging, many narrow ones do not.
+        results: await serperSearchPaged(query.query, pagesPerQuery),
       }))
     );
 
@@ -91,9 +95,14 @@ export async function processSearchPipeline(
     }
 
     if (successfulQueries === 0) {
-      throw new Error(
-        `All ${queries.length} searches failed. ${lastSearchError instanceof Error ? lastSearchError.message : ''}`
-      );
+      const detail = lastSearchError instanceof Error ? lastSearchError.message : '';
+      if (/credit/i.test(detail)) {
+        throw new Error(
+          'Serper search credits are exhausted. Top up at serper.dev to run more searches — ' +
+            'no candidates could be fetched.'
+        );
+      }
+      throw new Error(`All ${queries.length} searches failed. ${detail}`);
     }
 
     session.totalResultsFound = allResults.length;

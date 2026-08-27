@@ -195,6 +195,13 @@ function industryTerms(industries: string[]): string[] {
   return [...terms].filter(Boolean);
 }
 
+// Words indicating someone is currently studying, which is how a student's
+// profile identifies itself when it carries no job title at all.
+const STUDENT_MARKERS = [
+  'student', 'pursuing', 'undergraduate', 'aspiring', 'final year', 'fresher',
+  'graduate 20', 'batch of', 'class of',
+];
+
 /** Seniority words, used when a brief constrains years of experience. */
 const SENIOR_MARKERS = ['senior', 'sr', 'lead', 'principal', 'staff', 'head', 'director', 'vp', 'vice president', 'chief', 'manager', 'architect'];
 const JUNIOR_MARKERS = ['intern', 'trainee', 'fresher', 'junior', 'jr', 'associate', 'graduate', 'entry'];
@@ -263,13 +270,17 @@ export function assessRelevance(
 
   // A brief capped at a year or two is asking for entry level; a Director is a
   // mismatch however well the rest of the profile reads.
-  if (brief.maxExperience !== null && brief.maxExperience <= 2) {
+  const entryLevelWanted =
+    brief.studentStatus === 'pursuing' ||
+    (brief.maxExperience !== null && brief.maxExperience <= 2);
+
+  if (entryLevelWanted) {
     const senior = SENIOR_MARKERS.find((m) => titleLower.includes(m));
     if (senior && !JUNIOR_MARKERS.some((j) => titleLower.includes(j))) {
       return {
         tier: 'excluded',
         tierLabel: 'Removed',
-        reason: `${designation.trim()} - too senior for under ${brief.maxExperience} year(s)`,
+        reason: `${designation.trim()} - too senior for ${brief.studentStatus === 'pursuing' ? 'a student profile' : `under ${brief.maxExperience} year(s)`}`,
         keep: false,
       };
     }
@@ -290,8 +301,10 @@ export function assessRelevance(
   // Employer / sector evidence. When a brief names companies or an industry,
   // a matching job title at an unrelated employer is not what was asked for.
   const wantsCompany =
-    brief.preferredCompanies.length > 0 || (brief.inferredCompanies ?? []).length > 0;
-  const wantsIndustry = brief.preferredIndustries.length > 0;
+    brief.studentStatus !== 'pursuing' &&
+    (brief.preferredCompanies.length > 0 || (brief.inferredCompanies ?? []).length > 0);
+  const wantsIndustry =
+    brief.studentStatus !== 'pursuing' && brief.preferredIndustries.length > 0;
 
   let employerNote = '';
   let employerUnverified = false;

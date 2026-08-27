@@ -77,7 +77,60 @@ export function buildQueries(brief: SearchBrief): SearchQuery[] {
       ? `(${titles.slice(0, 3).map(quoted).join(' OR ')})`
       : titles.map(quoted).join('');
 
-  for (const company of companies) {
+  // Student sourcing runs on degree and college, not employer: a BBA student's
+  // headline names their course and institution, rarely a job title.
+  const degrees = (brief.educationQualifications ?? []).filter((d) => d.trim()).slice(0, 4);
+  const institutions = (brief.inferredInstitutions ?? []).filter((i) => i.trim()).slice(0, 5);
+  const isStudentSearch = brief.studentStatus === 'pursuing';
+
+  if (degrees.length > 0) {
+    // Without a domain word these become "every BBA student in Mumbai". Fall
+    // back to the distinctive part of the job title ("HR" from "HR Intern").
+    const GENERIC = new Set([
+      'intern', 'internship', 'trainee', 'executive', 'associate', 'assistant',
+      'officer', 'specialist', 'analyst', 'manager', 'senior', 'junior',
+    ]);
+    const titleDomain = (primary ?? '')
+      .split(/\s+/)
+      .filter((w) => w && !GENERIC.has(w.toLowerCase()))
+      .join(' ');
+
+    const field = brief.preferredIndustries[0] || brief.mustHaveSkills[0] || titleDomain;
+
+    for (const degree of degrees) {
+      push(
+        `${base} ${quoted(degree)} ${field ? quoted(field) : ''} ${where}`.trim(),
+        'education_led',
+        `${degree} students in ${brief.locations[0] ?? 'target area'}`
+      );
+    }
+
+    // The exact title still matters when they already hold an internship.
+    if (primary) {
+      push(
+        `${base} ${quoted(primary)} ${quoted(degrees[0])} ${where}`.trim(),
+        'education_led',
+        `${primary} with ${degrees[0]}`
+      );
+    }
+  }
+
+  for (const institution of institutions) {
+    const domain =
+      brief.preferredIndustries[0] ||
+      (primary ?? '')
+        .split(/\s+/)
+        .filter((w) => w && !['intern', 'trainee', 'executive'].includes(w.toLowerCase()))
+        .join(' ');
+
+    push(
+      `${base} ${quoted(institution)} ${domain ? quoted(domain) : quoted(degrees[0] ?? '')}`.trim(),
+      'education_led',
+      `Campus: ${institution}`
+    );
+  }
+
+  for (const company of isStudentSearch ? [] : companies) {
     push(
       `${base} ${quoted(company)} ${titleAlternation}`.trim(),
       'company_led',
@@ -87,7 +140,7 @@ export function buildQueries(brief: SearchBrief): SearchQuery[] {
 
   // The brief may describe a sector rather than name every employer
   // ("or any such companies selling HRTech solutions").
-  for (const industry of brief.preferredIndustries.slice(0, 2)) {
+  for (const industry of isStudentSearch ? [] : brief.preferredIndustries.slice(0, 2)) {
     push(
       `${base} ${titleAlternation} ${quoted(industry)} ${where}`.trim(),
       'company_led',
@@ -122,6 +175,8 @@ export function buildQueries(brief: SearchBrief): SearchQuery[] {
   }
 
   // Company queries must not crowd out the title searches; budget for both.
-  const cap = companies.length > 0 ? companies.length + 2 + titleQueryBudget : 10;
+  const slots = isStudentSearch ? degrees.length + institutions.length : companies.length;
+  // Hard ceiling: every query costs Serper credits, which are finite.
+  const cap = Math.min(slots > 0 ? slots + 2 + titleQueryBudget : 10, 15);
   return queries.slice(0, cap);
 }
