@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import Header from '@/components/Header';
 import RequirementInput from '@/components/search/RequirementInput';
 import AdvancedFilters from '@/components/search/AdvancedFilters';
+import RefinePanel, { AnalyzeResult } from '@/components/search/RefinePanel';
 
 const EXAMPLE =
   'Looking for a Senior Backend Engineer with 4–7 years of experience in Python, Django, AWS and microservices. Candidates should preferably have product startup experience. Location: Bangalore.';
@@ -21,13 +22,43 @@ export default function Home() {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [advancedFilters, setAdvancedFilters] = useState({});
   const [loading, setLoading] = useState(false);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analysis, setAnalysis] = useState<AnalyzeResult | null>(null);
   const [error, setError] = useState('');
 
-  const handleSearch = async () => {
+  const handleAnalyze = async () => {
     if (!requirement.trim()) {
       setError('Please enter a hiring requirement');
       return;
     }
+
+    setError('');
+    setAnalyzing(true);
+
+    try {
+      const response = await fetch('/api/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requirement }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Could not analyse requirement');
+      setAnalysis(data as AnalyzeResult);
+    } catch (err) {
+      // Analysis is a convenience, not a gate — fall through to searching.
+      console.error(err);
+      await runSearch('');
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  const runSearch = async (extraDetail: string) => {
+    const finalRequirement = extraDetail.trim()
+      ? `${requirement.trim()}
+
+Additional requirements: ${extraDetail.trim()}`
+      : requirement.trim();
 
     setError('');
     setLoading(true);
@@ -36,7 +67,7 @@ export default function Home() {
       const response = await fetch('/api/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ requirement, advancedFilters }),
+        body: JSON.stringify({ requirement: finalRequirement, advancedFilters }),
       });
 
       const data = await response.json();
@@ -50,7 +81,7 @@ export default function Home() {
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && e.ctrlKey) handleSearch();
+    if (e.key === 'Enter' && e.ctrlKey) handleAnalyze();
   };
 
   return (
@@ -78,13 +109,27 @@ export default function Home() {
           </p>
         </section>
 
+        {analysis ? (
+          <div className="mt-9">
+            <RefinePanel
+              analysis={analysis}
+              loading={loading}
+              onSearch={(extra) => runSearch(extra)}
+              onUseSuggested={(prompt) => {
+                setRequirement(prompt);
+                setAnalysis(null);
+              }}
+              onCancel={() => setAnalysis(null)}
+            />
+          </div>
+        ) : (
         <section className="card card-lift mt-9 p-6 sm:p-8">
           <RequirementInput
             value={requirement}
             onChange={setRequirement}
             onKeyPress={handleKeyPress}
-            loading={loading}
-            onSearch={handleSearch}
+            loading={loading || analyzing}
+            onSearch={handleAnalyze}
           />
 
           <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-alphanom-line pt-4">
@@ -99,6 +144,7 @@ export default function Home() {
             </button>
           </div>
         </section>
+        )}
 
         {error && (
           <div className="mt-4 rounded-card border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">

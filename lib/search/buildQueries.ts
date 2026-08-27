@@ -62,6 +62,33 @@ export function buildQueries(brief: SearchBrief): SearchQuery[] {
     .filter((t): t is string => Boolean(t && t.trim()))
     .slice(0, 7);
 
+  // Named employers are the strongest constraint a brief can carry, so search
+  // them explicitly and first. Without this the company list is extracted and
+  // then never used, and results come from arbitrary employers.
+  const companies = brief.preferredCompanies.filter((c) => c.trim()).slice(0, 8);
+  const titleAlternation =
+    titles.length > 1
+      ? `(${titles.slice(0, 3).map(quoted).join(' OR ')})`
+      : titles.map(quoted).join('');
+
+  for (const company of companies) {
+    push(
+      `${base} ${quoted(company)} ${titleAlternation}`.trim(),
+      'company_led',
+      `Target employer: ${company}`
+    );
+  }
+
+  // The brief may describe a sector rather than name every employer
+  // ("or any such companies selling HRTech solutions").
+  for (const industry of brief.preferredIndustries.slice(0, 2)) {
+    push(
+      `${base} ${titleAlternation} ${quoted(industry)} ${where}`.trim(),
+      'company_led',
+      `Sector: ${industry}`
+    );
+  }
+
   for (const title of titles) {
     push(
       `${base} ${quoted(title)} ${where}`.trim(),
@@ -88,5 +115,8 @@ export function buildQueries(brief: SearchBrief): SearchQuery[] {
     push(`${base} ${quoted(primary)}`.trim(), 'recall_expansion', 'Title without location');
   }
 
-  return queries.slice(0, 10);
+  // Named employers add queries without displacing the title searches, which
+  // still have to run for the brief to be covered.
+  const cap = companies.length > 0 ? 14 : 10;
+  return queries.slice(0, cap);
 }

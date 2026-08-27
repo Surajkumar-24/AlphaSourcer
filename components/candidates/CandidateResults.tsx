@@ -57,6 +57,44 @@ export default function CandidateResults({ session }: { session: SearchSession }
 
   return (
     <div className="space-y-6">
+      {/* The requirement this shortlist answers, kept visible for context. */}
+      {session.rawRequirement && (
+        <details className="card p-5 sm:p-6" open>
+          <summary className="cursor-pointer list-none">
+            <span className="section-label">Your requirement</span>
+          </summary>
+          <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-alphanom-navy/80">
+            {session.rawRequirement}
+          </p>
+          {session.searchBrief && (
+            <div className="mt-4 flex flex-wrap gap-2 border-t border-alphanom-line pt-3">
+              {session.searchBrief.primaryTitle && (
+                <span className="badge bg-alphanom-teal-soft text-alphanom-navy">
+                  {session.searchBrief.primaryTitle}
+                </span>
+              )}
+              {session.searchBrief.locations.map((loc) => (
+                <span key={loc} className="badge bg-alphanom-bg text-alphanom-muted ring-1 ring-alphanom-line">
+                  {loc}
+                </span>
+              ))}
+              {(session.searchBrief.minExperience !== null ||
+                session.searchBrief.maxExperience !== null) && (
+                <span className="badge bg-alphanom-bg text-alphanom-muted ring-1 ring-alphanom-line">
+                  {session.searchBrief.minExperience ?? 0}–
+                  {session.searchBrief.maxExperience ?? 'any'} yrs
+                </span>
+              )}
+              {session.searchBrief.preferredCompanies.slice(0, 6).map((c) => (
+                <span key={c} className="badge bg-alphanom-bg text-alphanom-muted ring-1 ring-alphanom-line">
+                  {c}
+                </span>
+              ))}
+            </div>
+          )}
+        </details>
+      )}
+
       <div className="overflow-hidden rounded-card bg-brand-gradient shadow-lift">
         <div className="flex flex-col gap-6 p-6 sm:p-8 lg:flex-row lg:items-center lg:justify-between">
           <div>

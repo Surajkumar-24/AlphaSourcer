@@ -175,6 +175,30 @@ export function locationMismatch(
   return true;
 }
 
+// Words that identify the sector when a brief names an industry rather than
+// listing every employer in it.
+const INDUSTRY_TERMS: Record<string, string[]> = {
+  recruitment: ['recruit', 'staffing', 'talent', 'hiring', 'headhunt', 'placement', 'manpower'],
+  staffing: ['staffing', 'recruit', 'talent', 'manpower', 'workforce'],
+  hrtech: ['hrtech', 'hr tech', 'hrms', 'hcm', 'people ops', 'human resource', 'hr software', 'ats'],
+  saas: ['saas', 'software', 'platform', 'product'],
+  fintech: ['fintech', 'payments', 'lending', 'banking'],
+};
+
+function industryTerms(industries: string[]): string[] {
+  const terms = new Set<string>();
+  for (const raw of industries) {
+    const key = normalize(raw).replace(/\s+/g, '');
+    terms.add(normalize(raw));
+    for (const term of INDUSTRY_TERMS[key] ?? []) terms.add(term);
+  }
+  return [...terms].filter(Boolean);
+}
+
+/** Seniority words, used when a brief constrains years of experience. */
+const SENIOR_MARKERS = ['senior', 'sr', 'lead', 'principal', 'staff', 'head', 'director', 'vp', 'vice president', 'chief', 'manager', 'architect'];
+const JUNIOR_MARKERS = ['intern', 'trainee', 'fresher', 'junior', 'jr', 'associate', 'graduate', 'entry'];
+
 /** Tolerates singular/plural drift: brief says "knowledge graphs", title says "knowledge graph". */
 function containsSkill(text: string, skill: string): boolean {
   const s = normalize(skill);
@@ -235,13 +259,75 @@ export function assessRelevance(
 
   const titleSet = tokenize(designation);
   const nameNote = candidate.name === 'Unknown' ? ' - candidate name missing in source' : '';
+  const titleLower = normalize(designation);
+
+  // A brief capped at a year or two is asking for entry level; a Director is a
+  // mismatch however well the rest of the profile reads.
+  if (brief.maxExperience !== null && brief.maxExperience <= 2) {
+    const senior = SENIOR_MARKERS.find((m) => titleLower.includes(m));
+    if (senior && !JUNIOR_MARKERS.some((j) => titleLower.includes(j))) {
+      return {
+        tier: 'excluded',
+        tierLabel: 'Removed',
+        reason: `${designation.trim()} - too senior for under ${brief.maxExperience} year(s)`,
+        keep: false,
+      };
+    }
+  }
+
+  if (brief.minExperience !== null && brief.minExperience >= 5) {
+    const junior = JUNIOR_MARKERS.find((m) => titleLower.includes(m));
+    if (junior) {
+      return {
+        tier: 'excluded',
+        tierLabel: 'Removed',
+        reason: `${designation.trim()} - too junior for ${brief.minExperience}+ years`,
+        keep: false,
+      };
+    }
+  }
+
+  // Employer / sector evidence. When a brief names companies or an industry,
+  // a matching job title at an unrelated employer is not what was asked for.
+  const wantsCompany = brief.preferredCompanies.length > 0;
+  const wantsIndustry = brief.preferredIndustries.length > 0;
+
+  let employerNote = '';
+  if (wantsCompany || wantsIndustry) {
+    const org = normalize(candidate.currentOrganization || '');
+    const context = `${org} ${normalize(candidate.searchSnippet)}`;
+
+    const namedCompany = brief.preferredCompanies.find((c) => {
+      const n = normalize(c);
+      return n.length > 2 && context.includes(n);
+    });
+
+    const sectorTerm = industryTerms(brief.preferredIndustries).find(
+      (t) => t.length > 2 && context.includes(t)
+    );
+
+    if (namedCompany) {
+      employerNote = ` at ${namedCompany}`;
+    } else if (sectorTerm) {
+      employerNote = ` - ${brief.preferredIndustries[0]} background`;
+    } else {
+      return {
+        tier: 'excluded',
+        tierLabel: 'Removed',
+        reason: `${designation.trim()}${candidate.currentOrganization ? ` at ${candidate.currentOrganization}` : ''} - not from ${
+          wantsCompany ? 'a target company' : brief.preferredIndustries.join('/')
+        }`,
+        keep: false,
+      };
+    }
+  }
 
   // Exact target title: every distinctive word of it appears in the job title.
   if (containsAllTokens(titleSet, core)) {
     return {
       tier: 'core',
       tierLabel: label('Core'),
-      reason: `${designation.trim()}${nameNote}`,
+      reason: `${designation.trim()}${employerNote}${nameNote}`,
       keep: true,
     };
   }
@@ -252,7 +338,7 @@ export function assessRelevance(
     return {
       tier: 'adjacent',
       tierLabel: label('Close match'),
-      reason: `${designation.trim()} - equivalent to ${matchedAlternate.label}${nameNote}`,
+      reason: `${designation.trim()}${employerNote} - equivalent to ${matchedAlternate.label}${nameNote}`,
       keep: true,
     };
   }
