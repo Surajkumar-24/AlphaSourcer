@@ -1,5 +1,6 @@
 import { groqRequest, createSystemMessage } from './client';
 import { SearchBrief } from '@/types/index';
+import { normalizeBrief } from '@/lib/search/normalizeBrief';
 
 const PARSE_REQUIREMENT_PROMPT = `Analyze the hiring requirement and extract a structured search brief.
 
@@ -47,12 +48,17 @@ RULES:
   Welingkar, K J Somaiya...). Empty otherwise. Real institutions only.
 - inferredCompanies: leave EMPTY when studentStatus is "pursuing" — students are
   found through their college, not through employers.
-- inferredCompanies: whenever an INDUSTRY or DOMAIN is named, list 8-12 real,
-  currently-operating companies in it, respecting any stated location (Indian
-  HRTech firms for an India-based HRTech brief). Do this EVEN IF the requirement
-  already names companies — phrases like "or any such companies" invite more.
-  Do NOT repeat companies already listed in preferredCompanies. Leave EMPTY only
-  when no industry or domain is stated. Real companies only — never invent.
+- inferredCompanies: name 8-12 real, currently-operating companies whose core
+  business is THE WORK THIS ROLE DOES, respecting any stated location. Derive
+  them from the ROLE, not from the sector the named companies happen to sit in:
+  for a Background Verification role, that means background-screening firms
+  (AuthBridge, IDfy, HireRight, First Advantage, OnGrid, SpringVerify), NOT
+  general HR software vendors like Darwinbox or Keka, which do not do that work.
+  Include these even when the requirement already names companies, since
+  phrasing like "or any such companies" invites more, but never repeat one
+  already listed in preferredCompanies. Before listing a company, check it
+  actually performs this role's function. Leave EMPTY when no industry, domain
+  or employer context is stated, and when studentStatus is "pursuing".
 - alternativeTitles: ALWAYS provide 3-6 real-world titles used for the SAME job
   (e.g. for "Ontologist": Knowledge Engineer, Taxonomist, Semantic Engineer,
   Knowledge Graph Engineer, Ontology Engineer). Never leave this empty.
@@ -79,11 +85,12 @@ export async function parseRequirement(requirement: string): Promise<SearchBrief
     },
   ];
 
-  const result = await groqRequest<SearchBrief>(messages, {
+  const result = await groqRequest<unknown>(messages, {
     temperature: 0.3,
     maxTokens: 1600,
     jsonMode: true,
   });
 
-  return result;
+  // Never hand an unvalidated model response to the rest of the pipeline.
+  return normalizeBrief(result);
 }

@@ -123,6 +123,7 @@ export async function processSearchPipeline(
         currentDesignation: parsed.currentDesignation,
         currentOrganization: parsed.currentOrganization,
         location: parsed.location,
+        yearsExperience: parsed.yearsExperience,
         linkedinUrl: result.url,
         searchSnippet: result.snippet,
         sourceQueries: [result.queryId],
@@ -146,6 +147,7 @@ export async function processSearchPipeline(
         relevanceTier: verdict.tier,
         relevanceLabel: verdict.tierLabel,
         relevanceReason: verdict.reason,
+        relevanceScore: verdict.score,
       };
       (verdict.keep ? relevant : removed).push(tagged);
     }
@@ -265,10 +267,11 @@ export async function processSearchPipeline(
 
     // Tier first, then score: a Core title match outranks an Adjacent one even
     // when keyword-based scoring happens to favour the latter.
-    const TIER_RANK: Record<string, number> = { core: 0, adjacent: 1, skill: 2, excluded: 3 };
+    // Relevance first — it reflects the stated requirements — then the scoring
+    // pipeline's own assessment as a tie-break.
     scoredCandidates.sort((a, b) => {
-      const tier = (TIER_RANK[a.relevanceTier ?? 'skill'] ?? 3) - (TIER_RANK[b.relevanceTier ?? 'skill'] ?? 3);
-      return tier !== 0 ? tier : b.finalScore - a.finalScore;
+      const rel = (b.relevanceScore ?? 0) - (a.relevanceScore ?? 0);
+      return rel !== 0 ? rel : b.finalScore - a.finalScore;
     });
 
     session.candidates = scoredCandidates;

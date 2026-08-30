@@ -9,6 +9,8 @@ export interface RelevanceVerdict {
   /** Short human explanation for the Shortlist/Removed sheets. */
   reason: string;
   keep: boolean;
+  /** Weighted total, 0-100, used for ranking. */
+  score?: number;
 }
 
 // Seniority and filler words carry no signal about *what* the role is.
@@ -222,10 +224,172 @@ function skillHits(haystack: string, skills: string[]): string[] {
   return skills.filter((skill) => containsSkill(text, skill));
 }
 
+/** Common role acronyms, so "BGV" and "Background Verification" unify. */
+const ACRONYM_EXPANSIONS: Record<string, string> = {
+  bgv: 'background verification',
+  sdr: 'sales development representative',
+  bdr: 'business development representative',
+  bde: 'business development executive',
+  sre: 'site reliability engineer',
+  qa: 'quality assurance',
+  ta: 'talent acquisition',
+  hr: 'human resources',
+  pm: 'product manager',
+  ml: 'machine learning',
+  kyc: 'know your customer',
+};
+
+/** Builds an initialism: "Background Verification Specialist" -> "bvs". */
+function initialism(text: string): string {
+  return normalize(text)
+    .split(' ')
+    .filter((w) => w.length > 2 && !STOPWORDS.has(w))
+    .map((w) => w[0])
+    .join('');
+}
+
+/** Appends the long form of any acronym present, so both forms are comparable. */
+function withExpansions(text: string): string {
+  let out = ` ${normalize(text)} `;
+  for (const [short, long] of Object.entries(ACRONYM_EXPANSIONS)) {
+    if (out.includes(` ${short} `)) out += ` ${long} `;
+  }
+  return out.trim();
+}
+
+const WEIGHTS = { title: 40, employer: 30, experience: 20, domain: 10 };
+const KEEP_THRESHOLD = 55;
+
 /**
- * Decides whether a candidate is plausibly in scope, using only the text we
- * already have. Runs on every candidate at zero token cost, which is what makes
- * it viable as a blanket filter rather than a top-N pass.
+ * How closely the job title matches, 0-100.
+ *
+ * Containment counts in either direction: "Verification Specialist" and
+ * "Background Verification Specialist" name the same job, and demanding an
+ * exact match was discarding people who plainly qualified.
+ */
+function scoreTitle(designation: string, brief: SearchBrief): { score: number; note: string } {
+  const titleSet = tokenize(withExpansions(designation));
+  const { core, alternates } = titleMatchers(brief);
+  const coreArr = [...core];
+
+  if (coreArr.length > 0 && containsAllTokens(titleSet, core)) {
+    return { score: 100, note: 'exact title' };
+  }
+
+  const matched = coreArr.filter((t) => hasToken(titleSet, t));
+  if (coreArr.length > 0 && matched.length >= Math.ceil(coreArr.length * 0.6)) {
+    return { score: 85, note: `partial title (${matched.join(', ')})` };
+  }
+
+  // Acronym in either direction: "RMG (BGV)" against "Background Verification".
+  const target = normalize(brief.primaryTitle || '');
+  const targetInitials = initialism(target);
+  const expanded = withExpansions(designation);
+  if (
+    (targetInitials.length >= 2 && titleSet.has(targetInitials)) ||
+    (target.length > 3 && expanded.includes(target))
+  ) {
+    return { score: 85, note: 'acronym match' };
+  }
+
+  const alt = alternates.find((a) => containsAllTokens(titleSet, a.tokens));
+  if (alt) return { score: 75, note: `equivalent to ${alt.label}` };
+
+  if (coreArr.some((t) => hasToken(titleSet, t))) {
+    return { score: 35, note: 'weak title overlap' };
+  }
+
+  return { score: 0, note: 'unrelated title' };
+}
+
+function scoreEmployer(
+  candidate: { currentOrganization: string | null; searchSnippet: string },
+  brief: SearchBrief
+): { score: number; note: string } {
+  const named = brief.preferredCompanies;
+  const peers = brief.inferredCompanies ?? [];
+  const sectors = industryTerms(brief.preferredIndustries);
+
+  if (named.length === 0 && peers.length === 0 && sectors.length === 0) {
+    return { score: 60, note: '' };
+  }
+
+  const context = `${normalize(candidate.currentOrganization || '')} ${normalize(
+    candidate.searchSnippet
+  )}`;
+
+  const hit = named.find((c) => normalize(c).length > 2 && context.includes(normalize(c)));
+  if (hit) return { score: 100, note: `at ${hit}` };
+
+  const peer = peers.find((c) => normalize(c).length > 2 && context.includes(normalize(c)));
+  if (peer) return { score: 80, note: `at ${peer}` };
+
+  const sector = sectors.find((t) => t.length > 2 && context.includes(t));
+  if (sector) return { score: 70, note: `${brief.preferredIndustries[0] ?? sector} background` };
+
+  // Unknown is neutral: never a free pass, never a rejection.
+  if (!candidate.currentOrganization) return { score: 50, note: 'employer not listed' };
+
+  return { score: 10, note: `at ${candidate.currentOrganization}` };
+}
+
+function scoreExperience(
+  years: number | null | undefined,
+  brief: SearchBrief
+): { score: number; note: string } {
+  const wantsEntry = brief.studentStatus === 'pursuing';
+  const { minExperience, maxExperience } = brief;
+
+  if (minExperience === null && maxExperience === null && !wantsEntry) {
+    return { score: 60, note: '' };
+  }
+  if (years == null) return { score: 60, note: '' };
+
+  const lo = wantsEntry ? 0 : minExperience ?? 0;
+  const hi = wantsEntry ? 1.5 : maxExperience ?? 45;
+
+  // Half a year of slack: profiles round their own tenure.
+  if (years >= lo - 0.5 && years <= hi + 0.5) {
+    return { score: 100, note: `${years.toFixed(1)} yrs` };
+  }
+
+  const drift = years > hi ? years - hi : lo - years;
+  if (drift <= 1.5) return { score: 55, note: `${years.toFixed(1)} yrs, just outside` };
+
+  // Positively identified as far outside a stated range. Like location, this is
+  // evidence of a mismatch rather than absence of evidence, so it is decisive.
+  if (drift > 2) {
+    return { score: -1, note: `${years.toFixed(1)} yrs vs ${lo}-${hi} required` };
+  }
+
+  return { score: 10, note: `${years.toFixed(1)} yrs vs ${lo}-${hi} wanted` };
+}
+
+function scoreDomain(
+  candidate: { currentDesignation: string | null; searchSnippet: string },
+  brief: SearchBrief
+): number {
+  const required = [...brief.mustHaveSkills, ...brief.educationQualifications];
+  if (required.length === 0) return 60;
+
+  const text = normalize(`${candidate.currentDesignation ?? ''} ${candidate.searchSnippet}`);
+  const hits = required.filter((r) => {
+    const n = normalize(r);
+    if (n.length < 2) return false;
+    const singular = n.endsWith('s') ? n.slice(0, -1) : n;
+    return text.includes(n) || text.includes(singular);
+  });
+
+  return Math.round((hits.length / required.length) * 100);
+}
+
+/**
+ * Weighs the available signals instead of chaining pass/fail gates. Strong
+ * evidence in one dimension can carry a weak signal in another, which is how a
+ * recruiter reads a profile — and it stops one missing field from discarding an
+ * otherwise obvious match.
+ *
+ * Location stays a hard gate: a requested geography is a requirement.
  */
 export function assessRelevance(
   candidate: {
@@ -233,29 +397,24 @@ export function assessRelevance(
     currentDesignation: string | null;
     currentOrganization: string | null;
     location?: string | null;
+    yearsExperience?: number | null;
     searchSnippet: string;
   },
   brief: SearchBrief
 ): RelevanceVerdict {
-  const candidateLocation = candidate.location || null;
   const roleName = brief.primaryTitle || 'Role';
-  const designation = candidate.currentDesignation || '';
-  const { core, alternates } = titleMatchers(brief);
+  const designation = (candidate.currentDesignation || '').trim();
 
-  const label = (tier: string) => `${tier} - ${roleName}`;
-
-  // Wrong geography outranks every other signal.
-  if (locationMismatch(candidateLocation, brief)) {
+  if (locationMismatch(candidate.location, brief)) {
     return {
       tier: 'excluded',
       tierLabel: 'Removed',
-      reason: `Based in ${candidateLocation} - outside ${brief.locations.join('/')}`,
+      reason: `Based in ${candidate.location} - outside ${brief.locations.join('/')}`,
       keep: false,
     };
   }
 
-  // Title-driven by design: without a designation there is no title to match.
-  if (!designation.trim()) {
+  if (!designation) {
     return {
       tier: 'excluded',
       tierLabel: 'Removed',
@@ -264,123 +423,62 @@ export function assessRelevance(
     };
   }
 
-  const titleSet = tokenize(designation);
-  const nameNote = candidate.name === 'Unknown' ? ' - candidate name missing in source' : '';
-  const titleLower = normalize(designation);
+  const title = scoreTitle(designation, brief);
 
-  // A brief capped at a year or two is asking for entry level; a Director is a
-  // mismatch however well the rest of the profile reads.
-  const entryLevelWanted =
-    brief.studentStatus === 'pursuing' ||
-    (brief.maxExperience !== null && brief.maxExperience <= 2);
-
-  if (entryLevelWanted) {
-    const senior = SENIOR_MARKERS.find((m) => titleLower.includes(m));
-    if (senior && !JUNIOR_MARKERS.some((j) => titleLower.includes(j))) {
-      return {
-        tier: 'excluded',
-        tierLabel: 'Removed',
-        reason: `${designation.trim()} - too senior for ${brief.studentStatus === 'pursuing' ? 'a student profile' : `under ${brief.maxExperience} year(s)`}`,
-        keep: false,
-      };
-    }
-  }
-
-  if (brief.minExperience !== null && brief.minExperience >= 5) {
-    const junior = JUNIOR_MARKERS.find((m) => titleLower.includes(m));
-    if (junior) {
-      return {
-        tier: 'excluded',
-        tierLabel: 'Removed',
-        reason: `${designation.trim()} - too junior for ${brief.minExperience}+ years`,
-        keep: false,
-      };
-    }
-  }
-
-  // Employer / sector evidence. When a brief names companies or an industry,
-  // a matching job title at an unrelated employer is not what was asked for.
-  const wantsCompany =
-    brief.studentStatus !== 'pursuing' &&
-    (brief.preferredCompanies.length > 0 || (brief.inferredCompanies ?? []).length > 0);
-  const wantsIndustry =
-    brief.studentStatus !== 'pursuing' && brief.preferredIndustries.length > 0;
-
-  let employerNote = '';
-  let employerUnverified = false;
-
-  if (wantsCompany || wantsIndustry) {
-    const org = normalize(candidate.currentOrganization || '');
-    const context = `${org} ${normalize(candidate.searchSnippet)}`;
-
-    const namedCompany = [
-      ...brief.preferredCompanies,
-      ...(brief.inferredCompanies ?? []),
-    ].find((c) => {
-      const n = normalize(c);
-      return n.length > 2 && context.includes(n);
-    });
-
-    const sectorTerm = industryTerms(brief.preferredIndustries).find(
-      (t) => t.length > 2 && context.includes(t)
-    );
-
-    if (namedCompany) {
-      employerNote = ` at ${namedCompany}`;
-    } else if (sectorTerm) {
-      employerNote = ` - ${brief.preferredIndustries[0]} background`;
-    } else if (!candidate.currentOrganization) {
-      // The employer is absent from the search result, not proven different.
-      // Dropping these treats missing information as a mismatch and was
-      // discarding roughly half of an otherwise valid shortlist.
-      employerUnverified = true;
-      employerNote = ' - employer not listed in the profile';
-    } else {
-      return {
-        tier: 'excluded',
-        tierLabel: 'Removed',
-        reason: `${designation.trim()} at ${candidate.currentOrganization} - not from ${
-          wantsCompany ? 'a target company' : brief.preferredIndustries.join('/')
-        }`,
-        keep: false,
-      };
-    }
-  }
-
-  // Exact target title: every distinctive word of it appears in the job title.
-  if (containsAllTokens(titleSet, core)) {
+  // No overlap at all with the target role is still decisive.
+  if (title.score === 0) {
     return {
-      tier: 'core',
-      tierLabel: label('Core'),
-      reason: `${designation.trim()}${employerNote}${nameNote}`,
-      keep: true,
+      tier: 'excluded',
+      tierLabel: 'Removed',
+      reason: `${designation} - not ${roleName} or a recognised equivalent`,
+      keep: false,
     };
   }
 
-  // A recognised synonym for the same profession, matched in full.
-  const matchedAlternate = alternates.find((alt) => containsAllTokens(titleSet, alt.tokens));
-  if (matchedAlternate) {
-    if (employerUnverified) {
-      return {
-        tier: 'skill',
-        tierLabel: `Unconfirmed employer - ${roleName}`,
-        reason: `${designation.trim()}${employerNote} - equivalent to ${matchedAlternate.label}${nameNote}`,
-        keep: true,
-      };
-    }
+  const employer = scoreEmployer(candidate, brief);
+  const experience = scoreExperience(candidate.yearsExperience, brief);
+
+  if (experience.score < 0) {
     return {
-      tier: 'adjacent',
-      tierLabel: label('Close match'),
-      reason: `${designation.trim()}${employerNote} - equivalent to ${matchedAlternate.label}${nameNote}`,
-      keep: true,
+      tier: 'excluded',
+      tierLabel: 'Removed',
+      reason: `${designation} - ${experience.note}`,
+      keep: false,
     };
   }
 
-  // Anything else is a different job, however strong the profile may be.
+  const domain = scoreDomain(candidate, brief);
+  const totalWeight = WEIGHTS.title + WEIGHTS.employer + WEIGHTS.experience + WEIGHTS.domain;
+
+  const total = Math.round(
+    (title.score * WEIGHTS.title +
+      employer.score * WEIGHTS.employer +
+      experience.score * WEIGHTS.experience +
+      domain * WEIGHTS.domain) /
+      totalWeight
+  );
+
+  const notes = [title.note, employer.note, experience.note].filter(Boolean).join(' · ');
+  const nameNote = candidate.name === 'Unknown' ? ' · name missing in source' : '';
+
+  if (total < KEEP_THRESHOLD) {
+    return {
+      tier: 'excluded',
+      tierLabel: 'Removed',
+      reason: `${designation} - scored ${total}/100 (${notes})`,
+      keep: false,
+      score: total,
+    };
+  }
+
+  const tier: RelevanceTier = total >= 85 ? 'core' : total >= 70 ? 'adjacent' : 'skill';
+  const band = total >= 85 ? 'Core' : total >= 70 ? 'Strong' : 'Possible';
+
   return {
-    tier: 'excluded',
-    tierLabel: 'Removed',
-    reason: `${designation.trim()} - not ${roleName} or a recognised equivalent`,
-    keep: false,
+    tier,
+    tierLabel: `${band} - ${roleName}`,
+    reason: `${designation} · ${notes}${nameNote} (${total}/100)`,
+    keep: true,
+    score: total,
   };
 }

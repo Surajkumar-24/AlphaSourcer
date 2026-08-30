@@ -49,6 +49,8 @@ export type Candidate = {
   currentDesignation: string | null;
   currentOrganization: string | null;
   location: string | null;
+  /** Stated years of experience, where the profile text reveals it. */
+  yearsExperience?: number | null;
   linkedinUrl: string;
   searchSnippet: string;
   sourceQueries: string[];
@@ -67,6 +69,8 @@ export type Candidate = {
   relevanceTier?: 'core' | 'adjacent' | 'skill' | 'excluded';
   relevanceLabel?: string;
   relevanceReason?: string;
+  /** Weighted relevance total, 0-100. */
+  relevanceScore?: number;
 };
 
 export type SearchSession = {
