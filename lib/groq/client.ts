@@ -1,4 +1,4 @@
-import { GROQ_CONFIG, getModelChain, ModelSpec } from '@/config/models';
+import { GROQ_CONFIG, getModelChain, ModelSpec, rotateGroqApiKey } from '@/config/models';
 
 /** Per-search token accounting, so quota use is measurable rather than guessed. */
 export const tokenLedger = {
@@ -100,6 +100,9 @@ export async function groqRequest<T = any>(
         }
 
         if (info.status === 429) {
+          // Try the next API key first — a fresh key has its own rate limit.
+          rotateGroqApiKey();
+
           const waitMs = info.retryAfterMs ?? Math.min(2000 * 2 ** (attempt - 1), 15000);
 
           if (waitMs > waitCeiling) {

@@ -1,5 +1,5 @@
 import { SearchResult } from '@/types/index';
-import { SERPER_CONFIG } from '@/config/models';
+import { SERPER_CONFIG, rotateSerperApiKey } from '@/config/models';
 import { SerperGeo, geoParams } from '@/lib/serper/geo';
 
 // Serper allows 5 requests per second. The pipeline fans out every query and
@@ -52,6 +52,8 @@ export async function serperSearch(
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
       if (!isRateLimit(lastError.message) || attempt === MAX_RETRIES) break;
+      // Rotate to next API key before retrying — a fresh key has its own limit.
+      rotateSerperApiKey();
       // 300ms, 600ms, 1200ms
       await sleep(300 * 2 ** attempt);
     }

@@ -9,6 +9,35 @@ export type ModelSpec = {
 };
 
 /**
+ * Multiple API keys, comma-separated. When one key is rate-limited the client
+ * rotates to the next, multiplying free-tier capacity without any code change
+ * on the caller side.
+ *
+ * Set in .env.local:
+ *   GROQ_API_KEY=key1,key2,key3
+ */
+function parseKeys(raw: string | undefined): string[] {
+  if (!raw) return [];
+  return raw.split(',').map((k) => k.trim()).filter(Boolean);
+}
+
+const groqKeys = parseKeys(process.env.GROQ_API_KEY);
+let groqKeyIndex = 0;
+
+export function getGroqApiKey(): string | undefined {
+  if (groqKeys.length === 0) return undefined;
+  return groqKeys[groqKeyIndex % groqKeys.length];
+}
+
+/** Rotate to the next API key (called on 429). */
+export function rotateGroqApiKey(): string | undefined {
+  if (groqKeys.length <= 1) return getGroqApiKey();
+  groqKeyIndex = (groqKeyIndex + 1) % groqKeys.length;
+  console.log(`[groq] rotated to API key #${groqKeyIndex + 1} of ${groqKeys.length}`);
+  return groqKeys[groqKeyIndex];
+}
+
+/**
  * Tried in order. Groq meters rate limits per model, so falling through is not
  * only resilience against a decommissioned or failing model — it also unlocks a
  * fresh token budget when one model is exhausted.
@@ -63,11 +92,27 @@ export const AI_MODELS = {
 };
 
 export const GROQ_CONFIG = {
-  apiKey: process.env.GROQ_API_KEY,
+  get apiKey() { return getGroqApiKey(); },
   baseURL: 'https://api.groq.com/openai/v1',
 };
 
+const serperKeys = parseKeys(process.env.SERPER_API_KEY);
+let serperKeyIndex = 0;
+
+export function getSerperApiKey(): string | undefined {
+  if (serperKeys.length === 0) return undefined;
+  return serperKeys[serperKeyIndex % serperKeys.length];
+}
+
+/** Rotate to the next Serper API key (called on 429 or credit exhaustion). */
+export function rotateSerperApiKey(): string | undefined {
+  if (serperKeys.length <= 1) return getSerperApiKey();
+  serperKeyIndex = (serperKeyIndex + 1) % serperKeys.length;
+  console.log(`[serper] rotated to API key #${serperKeyIndex + 1} of ${serperKeys.length}`);
+  return serperKeys[serperKeyIndex];
+}
+
 export const SERPER_CONFIG = {
-  apiKey: process.env.SERPER_API_KEY,
+  get apiKey() { return getSerperApiKey(); },
   baseURL: 'https://google.serper.dev',
 };
