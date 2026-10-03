@@ -1,4 +1,4 @@
-import { GROQ_CONFIG, getModelChain, ModelSpec, rotateGroqApiKey } from '@/config/models';
+import { GROQ_CONFIG, getModelChain, ModelSpec, rotateGroqApiKey, getProvider, rotateProviderApiKey } from '@/config/models';
 
 /** Per-search token accounting, so quota use is measurable rather than guessed. */
 export const tokenLedger = {
@@ -57,11 +57,11 @@ export async function groqRequest<T = any>(
   messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>,
   options?: GroqOptions
 ): Promise<T> {
-  if (!GROQ_CONFIG.apiKey) {
-    throw new Error('GROQ_API_KEY not configured');
+  const chain = getModelChain();
+  if (chain.length === 0) {
+    throw new Error('No LLM provider configured. Set at least one of: GROQ_API_KEY, OPENROUTER_API_KEY, CEREBRAS_API_KEY');
   }
 
-  const chain = getModelChain();
   let lastError: unknown = null;
 
   // Retrying across three models could otherwise stack minutes of backoff and
@@ -100,8 +100,8 @@ export async function groqRequest<T = any>(
         }
 
         if (info.status === 429) {
-          // Try the next API key first — a fresh key has its own rate limit.
-          rotateGroqApiKey();
+          // Try the next API key for this model's provider — a fresh key has its own limit.
+          rotateProviderApiKey(model.provider);
 
           const waitMs = info.retryAfterMs ?? Math.min(2000 * 2 ** (attempt - 1), 15000);
 
@@ -145,12 +145,30 @@ async function groqRequestOnce<T = any>(
   const baseTokens = options?.maxTokens ?? 2000;
   const maxTokens = Math.round(baseTokens * model.tokenMultiplier);
 
-  const response = await fetch(`${GROQ_CONFIG.baseURL}/chat/completions`, {
+  // Route to the correct provider (Groq, OpenRouter, or Cerebras).
+  const provider = getProvider(model.provider);
+  const apiKey = provider.keyPool.keys.length > 0
+    ? provider.keyPool.keys[provider.keyPool.index % provider.keyPool.keys.length]
+    : undefined;
+
+  if (!apiKey) {
+    throw new Error(`No API key configured for provider ${model.provider}`);
+  }
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${apiKey}`,
+  };
+
+  // OpenRouter requires these headers for free model access.
+  if (model.provider === 'openrouter') {
+    headers['HTTP-Referer'] = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+    headers['X-Title'] = 'AlphaSourcer';
+  }
+
+  const response = await fetch(`${provider.baseURL}/chat/completions`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${GROQ_CONFIG.apiKey}`,
-    },
+    headers,
     body: JSON.stringify({
       model: model.id,
       messages,
