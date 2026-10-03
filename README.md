@@ -2,45 +2,42 @@
 
 **AI-powered candidate sourcing agent by AlphaNom.**
 
-Describe who you're looking for. AlphaSourcer builds the search strategy, runs intelligent X-ray searches, and ranks the most relevant candidates.
+Describe who you're looking for. AlphaSourcer builds the search strategy, runs intelligent X-ray searches against LinkedIn via Google, scores and ranks the most relevant candidates, and exports a recruiter-ready shortlist.
 
 ## Quick Start
 
 ### Prerequisites
 
-- Node.js 18+ and npm
+- Node.js 20+ and npm
 - Groq API key ([Get one](https://console.groq.com))
 - Serper API key ([Get one](https://serper.dev))
 
 ### Installation
 
-1. Clone or navigate to the project directory:
-
 ```bash
+git clone https://github.com/chandupatil07/AlphaSourcer.git
 cd AlphaSourcer
-```
-
-2. Install dependencies:
-
-```bash
 npm install
 ```
 
-3. Set up environment variables:
+### Environment Setup
 
 ```bash
 cp .env.example .env.local
 ```
 
-4. Edit `.env.local` and add your API keys:
+Edit `.env.local` and add your API keys:
 
 ```env
 GROQ_API_KEY=your_groq_api_key
 SERPER_API_KEY=your_serper_api_key
-GROQ_PRIMARY_MODEL=mixtral-8x7b-32768
-GROQ_EXTRACTION_MODEL=mixtral-8x7b-32768
-MAX_SEARCHES_PER_DAY=50
-NEXT_PUBLIC_APP_URL=http://localhost:3000
+```
+
+For Vercel / serverless deployment, also set:
+
+```env
+UPSTASH_REDIS_REST_URL=your_upstash_url
+UPSTASH_REDIS_REST_TOKEN=your_upstash_token
 ```
 
 ### Running Locally
@@ -53,135 +50,161 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 
 ## How It Works
 
-### 1. **Requirement Input**
+### 1. Requirement Input
 
 Enter a natural language hiring requirement:
 
-> "Looking for a Senior Backend Engineer with 4–7 years of experience in Python, Django, AWS and microservices. Candidates should preferably have product startup experience. Location: Bangalore."
+> "Looking for a Senior Backend Engineer with 4–7 years of experience in Python, Django, AWS. Location: Bangalore only."
 
-### 2. **AI Analysis**
+### 2. AI Parsing
 
-Groq API analyzes the requirement and extracts:
+Groq LLM parses the requirement and extracts:
 - Primary and alternative job titles
 - Must-have and good-to-have skills
 - Experience range
-- Location preferences
-- Company and industry filters
+- Location preferences and country
+- Company and industry preferences/exclusions
 
-### 3. **X-Ray Query Generation**
+### 3. X-Ray Query Generation
 
-The system generates 6–10 diverse search queries across multiple families:
-- **Precision Search** — exact title + skills + location
-- **Alternative Title Search** — alternative titles + skills
-- **Skill-Led Search** — skills as primary discovery
-- **Adjacent Role Search** — neighboring roles
-- **Company-Led Search** — preferred companies
-- **Recall Expansion** — broader criteria
+The system deterministically generates 6–10 diverse Boolean search queries:
+- **Precision** — exact title + skills + location
+- **Alternative Title** — alternative titles + skills
+- **Skill-Led** — one probe per must-have skill (quoted, for provenance)
+- **Company-Led** — preferred companies + title
+- **Education-Led** — for fresher/student searches
+- **Recall Expansion** — broader criteria for coverage
 
-### 4. **LinkedIn Profile Search**
+### 4. Rate-Limited LinkedIn Search
 
-Serper API executes each query, finding individual LinkedIn profiles matching the searches.
+Serper API executes each query with rate limiting (~4.5 req/s) and retry on 429s, searching Google for individual LinkedIn profiles (`site:linkedin.com/in/`).
 
-### 5. **Candidate Information Extraction**
+### 5. Deterministic Candidate Extraction
 
-For each result:
-- Extract name, designation, organization
-- Validate extraction confidence
-- Filter low-confidence results
-- Deduplicate candidates
+For each Google result, a regex-based parser extracts:
+- Name, title, employer (from snippet patterns)
+- Location (from snippet prose, with city/country matching)
+- Years of experience (from date ranges)
+- Confirmed skills (from search provenance — which query found them)
 
-### 6. **Hybrid Relevance Scoring**
+No LLM is used for extraction. Profiles are deduplicated by LinkedIn URL, keeping the richest snippet.
 
-Each candidate receives two scores:
+### 6. Scoring & Ranking
 
-**Deterministic Score (60%)**
-- Title match
-- Skill match (must-have + good-to-have)
-- Experience/seniority
-- Location
-- Company/industry
-- Preferences
-- Other signals
+**Relevance filter** — first-pass weighted score (title 40%, employer 30%, experience 20%, domain 10%) drops candidates below threshold 55.
 
-**Contextual AI Score (40%)**
-- AI evaluates fit based on available evidence
-- Identifies confirmed matches
-- Flags uncertain requirements
-- Rates overall match strength
+**Deterministic score** — role-weighted score across 7 dimensions:
+| Dimension | Tech Weight | Description |
+|---|---|---|
+| Title match | 25 | Word overlap with primary/alternative/adjacent titles |
+| Must-have skills | 35 | Confirmed via search provenance + snippet |
+| Experience/seniority | 15 | Years extracted vs. brief range, title-word fallback |
+| Location | 10 | City/country matching against brief |
+| Company/industry | 10 | Preferred/excluded company matching |
+| Preferences | 3 | Industry preferences/exclusions |
+| Other signals | 2 | Exclusion keywords |
 
-**Final Score = (Deterministic × 0.6) + (Contextual × 0.4)**
+**AI review** — top 20 candidates (by deterministic score) receive a contextual LLM evaluation via Groq.
 
-### 7. **Ranked Results**
+**Final score** = Deterministic (60%) + Contextual AI (40%)
 
-Candidates are sorted and grouped:
-- **Excellent Match** (90–100)
-- **Strong Match** (75–89)
-- **Potential Match** (60–74)
-- **Low Relevance** (<60)
+**Match strength bands:**
+- **Excellent** (90–100) · **Strong** (75–89) · **Potential** (60–74) · **Low** (<60)
 
-### 8. **Selection & Export**
+### 7. Skill Verification
 
-Select candidates and download an Excel file containing:
-- Sr. No.
-- Candidate Name
-- Current Designation
-- Current Organization
-- LinkedIn Profile URL
+For the top 25 candidates, targeted Google queries (`site:linkedin.com/in/<slug> "Django"`) confirm individual skills — zero-cost evidence that the profile page contains the exact term.
+
+### 8. Export
+
+Select candidates and download an Excel file with name, title, company, location, experience, LinkedIn URL, score, match strength, confirmed skills, and brief coverage summary.
 
 ## Project Structure
 
 ```
 alphasourcer/
 ├── app/
-│   ├── api/              # API routes
-│   ├── search/[id]/      # Search results page
-│   ├── layout.tsx        # Root layout
-│   ├── page.tsx          # Home page
-│   └── globals.css       # Global styles
+│   ├── api/search/         # Search pipeline API (POST + GET polling)
+│   ├── api/analyze/        # Requirement clarification API
+│   ├── api/export/         # Excel export API
+│   ├── search/[id]/        # Search results page
+│   ├── page.tsx            # Landing page
+│   └── layout.tsx          # Root layout
 ├── components/
-│   ├── search/           # Search components
-│   ├── candidates/       # Candidate components
-│   └── Header.tsx        # Header component
+│   ├── search/             # RequirementInput, RefinePanel, SearchProgress
+│   ├── candidates/         # CandidateResults, CandidateTable, ExportButton
+│   └── Header.tsx
 ├── lib/
-│   ├── groq/            # Groq API integration
-│   ├── serper/          # Serper search
-│   ├── scoring/         # Scoring logic
-│   ├── candidates/      # Candidate processing
-│   ├── export/          # Excel export
-│   ├── search/          # Search pipeline
-│   └── utils.ts         # Utilities
-├── config/              # Configuration
-├── types/               # TypeScript types
-└── package.json
+│   ├── search/             # Pipeline orchestrator, query builder, brief quality
+│   ├── candidates/         # Parser, relevance filter, dedup, job-advert filter
+│   ├── scoring/            # Deterministic scorer, stack detection
+│   ├── groq/               # LLM client, requirement parser, candidate evaluator
+│   ├── serper/             # Serper API client, rate limiter, geo params
+│   ├── geo/                # City/country dictionary, location extraction
+│   ├── export/             # Excel generation
+│   ├── session-store.ts    # Redis (Vercel) + local file fallback
+│   └── utils.ts            # Helpers (nanoid, URL normalisation, sleep)
+├── config/
+│   ├── scoring.ts          # Role-family weights, match strength bands
+│   ├── models.ts           # Groq model fallback chain
+│   └── limits.ts           # Search, eval, skill-verification limits
+├── eval/                   # Offline evaluation harness (zero API cost)
+│   ├── prove.ts            # Side-by-side old vs new scoring
+│   ├── replay.ts           # Re-score a saved session
+│   ├── accuracy.ts         # Precision/recall against human labels
+│   ├── compare.ts          # Compare two sessions
+│   ├── skills.ts           # Skill confirmation diagnostics
+│   ├── label.ts            # Interactive labelling tool
+│   ├── _baseline/          # Frozen master-branch code for comparison
+│   ├── fixtures/           # Recorded sessions as test data
+│   └── labels/             # Human-labelled CSVs
+├── types/index.ts          # All TypeScript interfaces
+├── docs/                   # Audit, experiments, changelog
+└── .github/workflows/      # CI: typecheck, build, eval harness
 ```
 
 ## Configuration
 
+### Model Fallback Chain
+
+Default chain (tried in order when rate-limited):
+1. `openai/gpt-oss-120b`
+2. `openai/gpt-oss-20b`
+3. `qwen/qwen3.8-27b`
+
+Override via environment:
+```env
+GROQ_MODEL_CHAIN=openai/gpt-oss-120b,openai/gpt-oss-20b,qwen/qwen3.8-27b
+GROQ_PRIMARY_MODEL=openai/gpt-oss-120b
+```
+
 ### Scoring Profiles
 
-Edit `config/scoring.ts` to adjust weights for different roles:
-- Technology
-- Sales
-- Recruitment
-- Finance
-- Operations
-- Marketing
-- Product
-- Design
-- Customer Success
-- Generic
+Edit `config/scoring.ts` to adjust dimension weights per role family:
+Technology, Sales, Recruitment, Finance, Operations, Generic.
+
+### Skill Verification
+
+```env
+SKILL_VERIFICATION=on            # on/off
+SKILL_VERIFY_CANDIDATES=25       # max candidates to probe
+SKILL_VERIFY_PROBES=60           # hard ceiling on credits
+SKILL_VERIFY_DEADLINE_MS=30000   # wall-clock deadline
+```
 
 ### Rate Limiting
 
-Set `MAX_SEARCHES_PER_DAY` in `.env.local` to control usage.
-
-### Models
-
-Change Groq models in `.env.local`:
-- `GROQ_PRIMARY_MODEL` — for parsing and query generation
-- `GROQ_EXTRACTION_MODEL` — for candidate extraction
+```env
+MAX_SEARCHES_PER_DAY=50
+```
 
 ## Development
+
+### Type check:
+
+```bash
+npm run typecheck
+```
 
 ### Build for production:
 
@@ -190,10 +213,12 @@ npm run build
 npm run start
 ```
 
-### Linting:
+### Run evaluation harness (zero cost):
 
 ```bash
-npm run lint
+npx tsx eval/replay.ts b.json                    # re-score a saved session
+npx tsx eval/prove.ts eval/fixtures/run1-before-fixes.json   # old vs new
+npx tsx eval/accuracy.ts eval/fixtures/run5-skill-verification.json  # precision/recall
 ```
 
 ## Deployment
@@ -202,73 +227,39 @@ npm run lint
 
 1. Push to GitHub
 2. Connect to Vercel
-3. Add environment variables
+3. Add environment variables (`GROQ_API_KEY`, `SERPER_API_KEY`, `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`)
 4. Deploy
 
-```bash
-vercel
-```
+### CI
 
-### Manual Deployment
-
-The app is a standard Next.js application and can be deployed to any Node.js hosting platform.
+Every push runs: TypeScript check → Production build → Evaluation harness on recorded sessions. See `.github/workflows/ci.yml`.
 
 ## Limitations & Non-Goals
 
 **MVP does NOT include:**
-- Email or phone finding
-- Contact enrichment
+- Email or phone finding / contact enrichment
 - LinkedIn login or automation
 - ATS integrations
-- Team collaboration
-- Payment systems
-- Candidate outreach
-- Analytics dashboard
-
-## Future Roadmap
-
-**Phase 2:**
-- Saved searches and candidate lists
-- Improved role-specific scoring
-- Company similarity discovery
-
-**Phase 3:**
-- Contact enrichment
-- Email and phone finding
-- ATS integrations
-- Team workspaces
-
-**Phase 4:**
-- Multi-country sourcing
-- Custom search engines
-- Personalized ranking models
+- Team collaboration or payment systems
+- Candidate outreach or analytics dashboard
 
 ## Troubleshooting
 
 ### "No candidates found"
-
 - Broaden location requirements
 - Reduce must-have skills
-- Add alternative titles
-- Check API quotas
+- Check API quotas (`SERPER_API_KEY`, `GROQ_API_KEY`)
 
-### Search hangs
-
+### Search hangs or times out
 - Check API key validity
-- Verify network connection
-- Check Groq and Serper status
-- Review logs
+- Verify Groq and Serper service status
+- On Vercel Hobby plan, `maxDuration` is 60s — consider Pro for longer pipelines
 
 ### Scoring seems off
-
-- Check scoring configuration in `config/scoring.ts`
-- Verify role family classification
-- Review candidate snippets for extraction quality
-
-## Support
-
-For issues or questions, refer to the AlphaNom documentation or contact support.
+- Review `config/scoring.ts` for role-family weight tuning
+- Check `KEEP_THRESHOLD` in `config/limits.ts` (default: 55)
+- Run `npx tsx eval/replay.ts <session.json>` to inspect score breakdowns
 
 ---
 
-**AlphaSourcer MVP v1.0** — Built with Next.js, TypeScript, Groq, and Serper
+**AlphaSourcer** — Built with Next.js 14, TypeScript, Groq, Serper, Upstash Redis

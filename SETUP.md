@@ -26,8 +26,8 @@ cp .env.example .env.local
 ```env
 GROQ_API_KEY=your_groq_key_here
 SERPER_API_KEY=your_serper_key_here
-GROQ_PRIMARY_MODEL=mixtral-8x7b-32768
-GROQ_EXTRACTION_MODEL=mixtral-8x7b-32768
+GROQ_PRIMARY_MODEL=openai/gpt-oss-120b
+GROQ_EXTRACTION_MODEL=openai/gpt-oss-120b
 MAX_SEARCHES_PER_DAY=50
 NEXT_PUBLIC_APP_URL=http://localhost:3000
 ```
@@ -97,7 +97,7 @@ MAX_SEARCHES_PER_DAY=50  # Adjust as needed
 
 Edit `.env.local`:
 ```env
-GROQ_PRIMARY_MODEL=mixtral-8x7b-32768
+GROQ_PRIMARY_MODEL=openai/gpt-oss-120b
 # or: llama2-70b-4096, gemma-7b-it, etc.
 ```
 

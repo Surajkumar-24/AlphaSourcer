@@ -203,7 +203,7 @@ Edit `config/scoring.ts` to adjust weights for:
 ### API Models
 Edit `.env.local`:
 ```env
-GROQ_PRIMARY_MODEL=mixtral-8x7b-32768        # Change model
+GROQ_PRIMARY_MODEL=openai/gpt-oss-120b        # Change model
 MAX_SEARCHES_PER_DAY=50                       # Rate limit
 ```
 
